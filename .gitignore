@@ -258,3 +258,83 @@ docs/.vitepress/dist/
 docs/.vitepress/cache/
 docs/en/awesome.md
 package-lock.json
+
+# =========================================
+# Phase Dynamics / Music Generation Project
+# =========================================
+
+# checkpoints
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# training outputs
+outputs/
+results/
+experiments/
+runs/
+wandb/
+tensorboard/
+tb_logs/
+
+# generated audio
+generated/
+samples/
+demo/
+*.flac
+*.ogg
+*.m4a
+
+# visualizations
+figures/
+plots/
+vis/
+
+# caches
+cache/
+.cache/
+hf_cache/
+huggingface/
+
+# model weights
+pretrained/
+weights/
+
+# datasets
+dataset/
+datasets/
+music_data/
+processed_data/
+
+# logs
+logs/
+*.log
+
+# vscode
+.vscode/
+
+# local configs
+*.local.yaml
+*.local.yml
+
+# temp
+tmp/
+temp/
+
+# OS
+Thumbs.db
+
+# CUDA / compile
+*.cu.o
+*.cubin
+
+# pytorch compile
+torch_compile_debug/
+
+# outputs
+output/
+gt/
+
+# wheel packages
+*.whl

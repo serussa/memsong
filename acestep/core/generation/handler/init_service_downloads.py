@@ -1,5 +1,6 @@
 """Download and precheck helpers for service initialization."""
 
+import os
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -24,12 +25,44 @@ class InitServiceDownloadsMixin:
         prefer_source: Optional[str],
     ) -> Optional[Tuple[str, bool]]:
         """Ensure required checkpoint assets exist locally, downloading when missing."""
-        if not check_main_model_exists(checkpoint_path):
-            logger.info("[initialize_service] Main model not found, starting auto-download...")
-            success, msg = ensure_main_model(checkpoint_path, prefer_source=prefer_source)
-            if not success:
-                return f"ERROR: Failed to download main model: {msg}", False
-            logger.info(f"[initialize_service] {msg}")
+        offline = os.environ.get("ACESTEP_OFFLINE", "").lower() in ("1", "true", "yes")
+        minimal_components = os.environ.get("ACESTEP_MINIMAL_COMPONENTS", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+
+        if minimal_components:
+            required_components = ["vae", "Qwen3-Embedding-0.6B", config_path]
+            missing_components = [
+                comp for comp in required_components if not check_model_exists(comp, checkpoint_path)
+            ]
+            if missing_components:
+                if offline:
+                    return (
+                        "ERROR: Required components missing and ACESTEP_OFFLINE is set: "
+                        f"{', '.join(missing_components)}. Please download them locally and retry.",
+                        False,
+                    )
+                if any(comp != config_path for comp in missing_components):
+                    logger.info("[initialize_service] Core components missing, starting auto-download...")
+                    success, msg = ensure_main_model(checkpoint_path, prefer_source=prefer_source)
+                    if not success:
+                        return f"ERROR: Failed to download main model: {msg}", False
+                    logger.info(f"[initialize_service] {msg}")
+        else:
+            if not check_main_model_exists(checkpoint_path):
+                if offline:
+                    return (
+                        "ERROR: Main model not found and ACESTEP_OFFLINE is set. "
+                        "Please download models locally and retry.",
+                        False,
+                    )
+                logger.info("[initialize_service] Main model not found, starting auto-download...")
+                success, msg = ensure_main_model(checkpoint_path, prefer_source=prefer_source)
+                if not success:
+                    return f"ERROR: Failed to download main model: {msg}", False
+                logger.info(f"[initialize_service] {msg}")
 
         if config_path == "":
             logger.warning(
@@ -37,6 +70,12 @@ class InitServiceDownloadsMixin:
             )
 
         if not check_model_exists(config_path, checkpoint_path):
+            if offline:
+                return (
+                    f"ERROR: DiT model '{config_path}' not found and ACESTEP_OFFLINE is set. "
+                    "Please download models locally and retry.",
+                    False,
+                )
             logger.info(f"[initialize_service] DiT model '{config_path}' not found, starting auto-download...")
             success, msg = ensure_dit_model(config_path, checkpoint_path, prefer_source=prefer_source)
             if not success:
