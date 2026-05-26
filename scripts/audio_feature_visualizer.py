@@ -33,7 +33,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "audio",
         nargs="?",
         type=Path,
-        default=Path("/root/ACE-Step-1.5/output/e07e419d-8da6-2853-1c4a-77e207d6b3ca.flac"),
+        default=Path("/root/ACE-Step-1.5/output/16a13426-717b-51c5-3a75-b08e90ce97d7.flac"),
         help="Input audio path (wav/mp3/flac/...)",
     )
     parser.add_argument(

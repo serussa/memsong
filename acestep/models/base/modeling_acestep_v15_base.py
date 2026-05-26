@@ -40,6 +40,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
 from tqdm import tqdm
 from vector_quantize_pytorch import ResidualFSQ
 
+from acestep.phase_memory import PhaseMemory
 
 # Local config import with fallback
 try:
@@ -451,7 +452,8 @@ class AceStepDiTLayer(GradientCheckpointingLayer):
     
     Uses scale-shift modulation from timestep embeddings for adaptive normalization.
     """
-    def __init__(self, config: AceStepConfig, layer_idx: int, use_cross_attention: bool = True):
+    def __init__(self, config: AceStepConfig, layer_idx: int, use_cross_attention: bool = True,
+                 use_phase_memory: bool = False):
         super().__init__()
 
         # 1. Self-attention sub-layer with adaptive normalization
@@ -468,6 +470,11 @@ class AceStepDiTLayer(GradientCheckpointingLayer):
         self.mlp_norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mlp = Qwen3MLP(config)
 
+        # 4. Phase Dynamics Memory — only on selected middle layers
+        self.use_phase_memory = use_phase_memory
+        if self.use_phase_memory:
+            self.phase_memory = PhaseMemory(dim=config.hidden_size)
+
         # Scale-shift table for adaptive layer norm modulation (6 values: 3 for self-attn, 3 for MLP)
         self.scale_shift_table = nn.Parameter(torch.randn(1, 6, config.hidden_size) / config.hidden_size**0.5)
         self.attention_type = config.layer_types[layer_idx]
@@ -477,6 +484,7 @@ class AceStepDiTLayer(GradientCheckpointingLayer):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         temb: torch.Tensor,
+        diffusion_step: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[EncoderDecoderCache] = None,
@@ -525,6 +533,10 @@ class AceStepDiTLayer(GradientCheckpointingLayer):
             # Standard residual connection for cross-attention
             hidden_states = hidden_states + attn_output
 
+        # Step 2.5: Phase Dynamics Memory — forced complex rotation + injection
+        if self.use_phase_memory and self.use_cross_attention and encoder_hidden_states is not None:
+            hidden_states = self.phase_memory(hidden_states, diffusion_step)
+
         # Step 3: Feed-forward (MLP) with adaptive layer norm
         # Apply adaptive normalization for MLP: norm(x) * (1 + scale) + shift
         norm_hidden_states = (self.mlp_norm(hidden_states) * (1 + c_scale_msa) + c_shift_msa).type_as(hidden_states)
@@ -561,8 +573,17 @@ class AceStepPreTrainedModel(PreTrainedModel):
 
         TODO: Support separate initialization for encoders and decoders.
         """
+        from acestep.phase_memory import PhaseMemory
+
         std = self.config.initializer_range
         if isinstance(module, nn.Linear):
+            # Skip normal init for PhaseMemory proj_out (must stay zero-init)
+            if getattr(module, "_pm_safe_output", False):
+                with torch.no_grad():
+                    nn.init.zeros_(module.weight)
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+                return
             module.weight.data.normal_(mean=0.0, std=std)
             if module.bias is not None:
                 module.bias.data.zero_()
@@ -572,6 +593,11 @@ class AceStepPreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
         elif isinstance(module, Qwen3RMSNorm):
             module.weight.data.fill_(1.0)
+        elif isinstance(module, PhaseMemory):
+            # Ensure PhaseMemory buffers are properly initialized after HF weight loading
+            with torch.no_grad():
+                module.z_init_real.normal_(0.0, 0.01)
+                module.z_init_imag.normal_(0.0, 0.01)
 
 
 class AceStepLyricEncoder(AceStepPreTrainedModel):
@@ -1250,8 +1276,17 @@ class AceStepDiTModel(AceStepPreTrainedModel):
         # Rotary position embeddings for transformer layers
         self.rotary_emb = Qwen3RotaryEmbedding(config)
         # Stack of DiT transformer layers
-        self.layers = nn.ModuleList(
-            [AceStepDiTLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+        # PhaseMemory: only on the single middle layer
+        num_layers = config.num_hidden_layers
+        hook_layer = num_layers // 2
+        self.layers = nn.ModuleList([
+            AceStepDiTLayer(config, layer_idx,
+                            use_phase_memory=(layer_idx == hook_layer))
+            for layer_idx in range(num_layers)
+        ])
+        logger.info(
+            f"PhaseMemory injected on layer {hook_layer} "
+            f"(1/{num_layers} layers)"
         )
 
         in_channels = config.in_channels
@@ -1466,6 +1501,7 @@ class AceStepDiTModel(AceStepPreTrainedModel):
                 hidden_states,
                 position_embeddings,
                 timestep_proj,
+                timestep,
                 self_attn_mask_mapping[layer_module.attention_type],
                 position_ids,
                 past_key_values,
@@ -1608,6 +1644,20 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def freeze_except_phase_memory(self) -> tuple[int, int]:
+        """Freeze all parameters except PhaseMemory sub-modules for targeted training.
+
+        Returns:
+            tuple[int, int]: (trainable_params, total_params).
+        """
+        from acestep.phase_memory import freeze_except_phase_memory
+        return freeze_except_phase_memory(self)
+
+    def unfreeze_all(self) -> None:
+        """Restore gradient computation for all parameters."""
+        from acestep.phase_memory import unfreeze_all
+        unfreeze_all(self)
 
     def tokenize(self, x, silence_latent, attention_mask):
         if x.shape[1] % self.config.pool_window_size != 0:
@@ -1850,6 +1900,8 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
         if attention_mask is None:
             latent_length = src_latents.shape[1]
             attention_mask = torch.ones(src_latents.shape[0], latent_length, device=src_latents.device, dtype=src_latents.dtype)
+        from acestep.phase_memory import reset_phase_memory
+        reset_phase_memory(self)
         time_costs = {}
         start_time = time.time()
         total_start_time = start_time

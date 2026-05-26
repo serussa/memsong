@@ -18,6 +18,7 @@ from typing import List, Optional
 from acestep.training.configs import (  # noqa: F401
     LoRAConfig,
     LoKRConfig,
+    PhaseMemoryConfig,
     TrainingConfig,
 )
 
@@ -69,6 +70,27 @@ class LoKRConfigV2(LoKRConfig):
     """Extended LoKR configuration.
 
     Inherits all fields from the original LoKRConfig and adds:
+    - attention_type: Which attention layers to target (self, cross, or both)
+    """
+
+    attention_type: str = "both"
+    """Which attention layers to target: 'self', 'cross', or 'both'."""
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base["attention_type"] = self.attention_type
+        return base
+
+
+# ---------------------------------------------------------------------------
+# Extended PhaseMemory config
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PhaseMemoryConfigV2(PhaseMemoryConfig):
+    """Extended PhaseMemory configuration.
+
+    Inherits all fields from the original PhaseMemoryConfig and adds:
     - attention_type: Which attention layers to target (self, cross, or both)
     """
 
@@ -153,7 +175,15 @@ class TrainingConfigV2(TrainingConfig):
 
     # --- Adapter selection ----------------------------------------------------
     adapter_type: str = "lora"
-    """Adapter type: 'lora' (PEFT) or 'lokr' (LyCORIS)."""
+    """Adapter type: 'lora' (PEFT), 'lokr' (LyCORIS), or 'phase_memory' (targeted)."""
+
+    # --- PhaseMemory-specific params ------------------------------------------
+    phase_memory_lr_multiplier: float = 1.0
+    """Learning rate multiplier for PhaseMemory parameters (relative to base LR).
+
+    Set > 1.0 to train PhaseMemory faster when doing joint training with other
+    adapter types.  Ignored when adapter_type is 'lora' or 'lokr' only.
+    """
 
     # --- Model / paths ------------------------------------------------------
     model_variant: str = "turbo"

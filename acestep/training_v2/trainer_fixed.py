@@ -50,7 +50,7 @@ from acestep.training_v2.trainer_helpers import (
     save_final,
     verify_saved_adapter,
 )
-from acestep.training_v2.trainer_basic_loop import run_basic_training_loop
+from acestep.training_v2.trainer_basic_loop import run_basic_training_loop, _log_phase_memory_gate
 
 logger = logging.getLogger(__name__)
 
@@ -395,6 +395,8 @@ class FixedLoRATrainer:
                     if global_step % cfg.log_heavy_every == 0:
                         tb.log_per_layer_grad_norms(self.module.model, global_step)
 
+                    _log_phase_memory_gate(self.module, tb, global_step)
+
                     optimizer.zero_grad(set_to_none=True)
                     epoch_loss += avg_loss
                     num_updates += 1
@@ -426,6 +428,8 @@ class FixedLoRATrainer:
                         kind="step", epoch=epoch + 1, max_epochs=cfg.max_epochs, lr=_lr,
                         steps_per_epoch=steps_per_epoch,
                     )
+
+                _log_phase_memory_gate(self.module, tb, global_step)
 
                 optimizer.zero_grad(set_to_none=True)
                 epoch_loss += avg_loss

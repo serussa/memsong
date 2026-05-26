@@ -206,7 +206,7 @@ def _add_common_training_args(parser: argparse.ArgumentParser) -> None:
     g_train = parser.add_argument_group("Training")
     g_train.add_argument("--lr", "--learning-rate", type=float, default=1e-4, dest="learning_rate", help="Initial learning rate (default: 1e-4)")
     g_train.add_argument("--batch-size", type=int, default=1, help="Training batch size (default: 1)")
-    g_train.add_argument("--gradient-accumulation", type=int, default=4, help="Gradient accumulation steps (default: 4)")
+    g_train.add_argument("--gradient-accumulation", type=int, default=1, help="Gradient accumulation steps (default: 1)")
     g_train.add_argument("--epochs", type=int, default=100, help="Maximum training epochs (default: 100)")
     g_train.add_argument("--warmup-steps", type=int, default=100, help="LR warmup steps (default: 100)")
     g_train.add_argument("--weight-decay", type=float, default=0.01, help="AdamW weight decay (default: 0.01)")
@@ -221,7 +221,7 @@ def _add_common_training_args(parser: argparse.ArgumentParser) -> None:
 
     # -- Adapter selection ---------------------------------------------------
     g_adapter = parser.add_argument_group("Adapter")
-    g_adapter.add_argument("--adapter-type", type=str, default="lora", choices=["lora", "lokr"], help="Adapter type: lora (PEFT) or lokr (LyCORIS) (default: lora)")
+    g_adapter.add_argument("--adapter-type", type=str, default="lora", choices=["lora", "lokr", "phase_memory"], help="Adapter type: lora (PEFT), lokr (LyCORIS), or phase_memory (Phase Dynamics Memory) (default: lora)")
 
     # -- LoRA hyperparams ---------------------------------------------------
     g_lora = parser.add_argument_group("LoRA (used when --adapter-type=lora)")
@@ -241,6 +241,12 @@ def _add_common_training_args(parser: argparse.ArgumentParser) -> None:
     g_lokr.add_argument("--lokr-use-tucker", action="store_true", default=False, help="Use Tucker decomposition")
     g_lokr.add_argument("--lokr-use-scalar", action="store_true", default=False, help="Use scalar scaling")
     g_lokr.add_argument("--lokr-weight-decompose", action="store_true", default=False, help="Enable DoRA-style weight decomposition")
+
+    # -- PhaseMemory hyperparams ---------------------------------------------
+    g_pm = parser.add_argument_group("PhaseMemory (used when --adapter-type=phase_memory)")
+    g_pm.add_argument("--phase-mem-dim", type=int, default=None, help="PhaseMemory internal dimension (default: hidden_size)")
+    g_pm.add_argument("--phase-mem-init-scale", type=float, default=0.01, help="PhaseMemory state init scale (default: 0.01)")
+    g_pm.add_argument("--phase-mem-lr-multiplier", type=float, default=1.0, help="LR multiplier for PhaseMemory params (default: 1.0)")
 
     # -- Checkpointing -------------------------------------------------------
     g_ckpt = parser.add_argument_group("Checkpointing")

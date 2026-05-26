@@ -24,6 +24,10 @@ from acestep.training.lokr_utils import (
     save_lokr_weights,
     load_lokr_weights,
 )
+from acestep.training.phase_memory_checkpoint import (
+    save_phase_memory_weights,
+    verify_phase_memory_weights,
+)
 from acestep.training_v2.ui import TrainingUpdate
 
 logger = logging.getLogger(__name__)
@@ -146,7 +150,7 @@ def save_adapter_flat(trainer: Any, output_dir: str) -> None:
     """Save adapter weights directly into *output_dir* (no nesting).
 
     Writes ``adapter_config.json`` and ``adapter_model.safetensors``
-    (or LoKR equivalent) directly into *output_dir* so that
+    (or LoKR / PhaseMemory equivalent) directly into *output_dir* so that
     inference tools can point straight at this directory.
     """
     module = trainer.module
@@ -166,6 +170,18 @@ def save_adapter_flat(trainer: Any, output_dir: str) -> None:
             )
         lokr_meta = {"lokr_config": module.adapter_config.to_dict()}
         save_lokr_weights(module.lycoris_net, output_dir, metadata=lokr_meta)
+
+    elif trainer.adapter_type == "phase_memory":
+        if not hasattr(module.model, "state_dict"):
+            raise RuntimeError(
+                "PhaseMemory adapter type was requested but the model has no "
+                "state_dict.  Cannot save weights."
+            )
+        pm_meta = getattr(module.adapter_config, "to_dict", lambda: {})()
+        pm_meta["trainable_params"] = module.adapter_info.get("trainable_params", 0)
+        pm_meta["total_params"] = module.adapter_info.get("total_params", 0)
+        save_phase_memory_weights(module.model, output_dir, metadata=pm_meta)
+
     else:
         # Access the decoder directly (PeftModel after LoRA injection,
         # possibly wrapped by Fabric's _FabricModule after setup).
@@ -255,6 +271,10 @@ def verify_saved_adapter(output_dir: str) -> None:
         lokr_path = os.path.join(output_dir, "lokr_weights.safetensors")
         if os.path.exists(lokr_path):
             logger.info("[OK] LoKR weights saved: %s", lokr_path)
+            return
+        pm_path = os.path.join(output_dir, "phase_memory_weights.safetensors")
+        if os.path.exists(pm_path):
+            verify_phase_memory_weights(output_dir)
             return
         logger.warning(
             "[WARN] No adapter weights found in %s -- check save path",
@@ -354,6 +374,34 @@ def resume_checkpoint(
             return (epoch, step)
         yield TrainingUpdate(
             0, 0.0, "[OK] LoKR weights loaded (no training state)", kind="info"
+        )
+        return None
+
+    # -- Detect PhaseMemory format ----------------------------------------
+    pm_weights_path = ckpt_dir / "phase_memory_weights.safetensors"
+    if pm_weights_path.exists():
+        from acestep.training.phase_memory_checkpoint import load_phase_memory_weights
+
+        load_phase_memory_weights(module.model, str(ckpt_dir))
+        if state_path.exists():
+            state = torch.load(
+                str(state_path), map_location=module.device, weights_only=False
+            )
+            epoch = state.get("epoch", 0)
+            step = state.get("global_step", 0)
+            if "optimizer_state_dict" in state:
+                optimizer.load_state_dict(state["optimizer_state_dict"])
+            if "scheduler_state_dict" in state:
+                scheduler.load_state_dict(state["scheduler_state_dict"])
+            yield TrainingUpdate(
+                0,
+                0.0,
+                f"[OK] Resumed PhaseMemory from epoch {epoch}, step {step}",
+                kind="info",
+            )
+            return (epoch, step)
+        yield TrainingUpdate(
+            0, 0.0, "[OK] PhaseMemory weights loaded (no training state)", kind="info"
         )
         return None
 

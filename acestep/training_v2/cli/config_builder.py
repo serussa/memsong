@@ -12,14 +12,14 @@ import logging
 from pathlib import Path
 from typing import Tuple, Union
 
-from acestep.training_v2.configs import LoRAConfigV2, LoKRConfigV2, TrainingConfigV2
+from acestep.training_v2.configs import LoRAConfigV2, LoKRConfigV2, PhaseMemoryConfigV2, TrainingConfigV2
 from acestep.training_v2.gpu_utils import detect_gpu
 from acestep.training_v2.cli.args import VARIANT_DIR_MAP
 from acestep.training_v2.cli.validation import resolve_target_modules
 
 logger = logging.getLogger(__name__)
 
-AdapterConfig = Union[LoRAConfigV2, LoKRConfigV2]
+AdapterConfig = Union[LoRAConfigV2, LoKRConfigV2, PhaseMemoryConfigV2]
 
 
 def _resolve_model_config_path(ckpt_root: Path, variant: str) -> Path:
@@ -108,6 +108,12 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
             use_scalar=getattr(args, "lokr_use_scalar", False),
             weight_decompose=getattr(args, "lokr_weight_decompose", False),
             target_modules=resolved_modules,
+            attention_type=attention_type,
+        )
+    elif adapter_type == "phase_memory":
+        adapter_cfg = PhaseMemoryConfigV2(
+            mem_dim=getattr(args, "phase_mem_dim", 128),
+            init_scale=getattr(args, "phase_mem_init_scale", 0.01),
             attention_type=attention_type,
         )
     else:

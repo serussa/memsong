@@ -14,6 +14,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -150,14 +151,35 @@ def load_decoder_for_training(
     model = None
     last_err: Optional[Exception] = None
 
+    use_local_code = os.environ.get("ACESTEP_LOCAL_MODEL_CODE", "0") == "1"
+
     for attn_impl in attn_candidates:
         try:
-            model = AutoModel.from_pretrained(
-                str(model_dir),
-                trust_remote_code=True,
-                attn_implementation=attn_impl,
-                dtype=dtype,
-            )
+            if use_local_code:
+                if variant == "sft":
+                    from acestep.models.sft.modeling_acestep_v15_base import (
+                        AceStepConditionGenerationModel,
+                    )
+                elif variant == "base":
+                    from acestep.models.base.modeling_acestep_v15_base import (
+                        AceStepConditionGenerationModel,
+                    )
+                else:
+                    from acestep.models.turbo.modeling_acestep_v15_turbo import (
+                        AceStepConditionGenerationModel,
+                    )
+                model = AceStepConditionGenerationModel.from_pretrained(
+                    str(model_dir),
+                    attn_implementation=attn_impl,
+                    dtype=dtype,
+                )
+            else:
+                model = AutoModel.from_pretrained(
+                    str(model_dir),
+                    trust_remote_code=True,
+                    attn_implementation=attn_impl,
+                    dtype=dtype,
+                )
             print(f"[OK] Model loaded with attn_implementation={attn_impl}")
             break
         except Exception as exc:

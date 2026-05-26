@@ -28,12 +28,12 @@ from acestep.training.lokr_utils import (
 )
 
 # V2 modules
-from acestep.training_v2.configs import LoRAConfigV2, LoKRConfigV2, TrainingConfigV2
+from acestep.training_v2.configs import LoRAConfigV2, LoKRConfigV2, PhaseMemoryConfigV2, TrainingConfigV2
 from acestep.training_v2.timestep_sampling import apply_cfg_dropout, sample_timesteps
 from acestep.training_v2.ui import TrainingUpdate
 
 # Union type for adapter configs
-AdapterConfig = Union[LoRAConfigV2, LoKRConfigV2]
+AdapterConfig = Union[LoRAConfigV2, LoKRConfigV2, PhaseMemoryConfigV2]
 
 
 class _LastLossAccessor:
@@ -141,6 +141,8 @@ class FixedLoRAModule(nn.Module):
         # -- Adapter injection -----------------------------------------------
         if self.adapter_type == "lokr":
             self._inject_lokr(model, adapter_config)  # type: ignore[arg-type]
+        elif self.adapter_type == "phase_memory":
+            self._inject_phase_memory(model)
         else:
             self._inject_lora(model, adapter_config)  # type: ignore[arg-type]
 
@@ -228,6 +230,33 @@ class FixedLoRAModule(nn.Module):
             "[OK] LoKR injected: %s trainable params (moved to %s)",
             f"{self.adapter_info['trainable_params']:,}",
             self.device,
+        )
+
+    def _inject_phase_memory(self, model: nn.Module) -> None:
+        """Activate PhaseMemory training: freeze all params except PhaseMemory.
+
+        PhaseMemory is already embedded in the DiT layers (no injection needed).
+        This method calls ``model.freeze_except_phase_memory()`` to freeze
+        everything except the PhaseMemory sub-modules.
+
+        Raises:
+            AttributeError: If the model does not support freeze_except_phase_memory.
+        """
+        if not hasattr(model, "freeze_except_phase_memory"):
+            raise AttributeError(
+                "Model does not support PhaseMemory training. "
+                "Ensure the model has PhaseMemory layers injected in DiT layers."
+            )
+        trainable, total = model.freeze_except_phase_memory()
+        self.model = model
+        self.adapter_info = {
+            "trainable_params": trainable,
+            "total_params": total,
+        }
+        logger.info(
+            "[OK] PhaseMemory training activated: %s trainable / %s total "
+            "params (%.2f%%)",
+            f"{trainable:,}", f"{total:,}", 100 * trainable / max(total, 1),
         )
 
     # -----------------------------------------------------------------------
