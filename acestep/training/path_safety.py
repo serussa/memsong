@@ -32,7 +32,7 @@ def _resolve(path: str) -> str:
 # Root directory that all user-provided paths must resolve under.
 # Defaults to the working directory at import time.  Override via
 # ``set_safe_root`` if needed (e.g. in tests).
-_SAFE_ROOT: str = _resolve(os.getcwd())
+_SAFE_ROOT: str = _resolve(os.environ.get("SIDESTEP_SAFE_ROOT", os.getcwd()))
 
 
 def set_safe_root(root: str) -> None:
@@ -84,7 +84,7 @@ def safe_path(user_path: str, *, base: Optional[str] = None) -> str:
     # ── CodeQL-recognised sanitiser barrier ──
     # ``normpath(…).startswith(safe_prefix)`` is the pattern that
     # CodeQL's ``py/path-injection`` query treats as a sanitiser.
-    if not normalised.startswith(root + os.sep) and normalised != root:
+    if os.path.commonpath([normalised, root]) != root:
         raise ValueError(
             f"Path escapes safe root: {user_path!r} "
             f"(resolved to {normalised!r}, root={root!r})"

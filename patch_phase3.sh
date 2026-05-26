@@ -1,0 +1,1 @@
+sed -i 's/        out = h + injected.unsqueeze(1)/        if True:\n            def _hook(grad):\n                if torch.isnan(grad).any():\n                    print("[DEBUG] NaN detected in backward of injected!")\n            injected.register_hook(_hook)\n        out = h + injected.unsqueeze(1)/' acestep/phase_memory.py

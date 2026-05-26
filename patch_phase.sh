@@ -1,0 +1,1 @@
+sed -i 's/        # ---- inject real part ----/        if getattr(self, "_checked", None) is None:\n            print(f"\\n[DEBUG] proj_out weight abs sum: {self.proj_out.weight.abs().sum().item()}\\n")\n            self._checked = True\n        # ---- inject real part ----/' acestep/phase_memory.py

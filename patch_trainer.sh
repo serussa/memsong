@@ -1,0 +1,1 @@
+sed -i 's/        # 4. Optimizer Step/        # ---- DEBUG ----\n        for name, p in self.fabric.model.named_parameters():\n            if p.requires_grad and p.grad is not None:\n                if not torch.isfinite(p.grad).all():\n                    print(f"[DEBUG] NaN\/Inf found in {name} grad!")\n        # 4. Optimizer Step/' acestep/training_v2/trainer_fixed.py

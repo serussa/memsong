@@ -18,6 +18,7 @@ from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import torch
 
+from acestep.phase_memory import PhaseMemory
 from acestep.training_v2.optim import build_optimizer, build_scheduler
 from acestep.training_v2.tensorboard_utils import TrainingLogger
 from acestep.training_v2.trainer_helpers import configure_memory_features, save_checkpoint, save_final
@@ -52,7 +53,17 @@ def _flush_accumulated(
         ``(global_step, avg_loss, updates)`` where *updates* is a list
         of ``TrainingUpdate`` objects the caller should yield.
     """
+    # ---- DEBUG: detect NaN source BEFORE clip (which throws on NaN) ----
+    grad_nan_params = []
+    for n, p in module.model.named_parameters():
+        if p.grad is not None and not torch.isfinite(p.grad).all():
+            grad_nan_params.append(n)
+    if grad_nan_params:
+        print("\n[DEBUG] NaN/Inf grad in params:", grad_nan_params[:10])
+    # ---- END DEBUG ----
+
     torch.nn.utils.clip_grad_norm_(trainable_params, cfg.max_grad_norm)
+
     optimizer.step()
     scheduler.step()
     optimizer.zero_grad(set_to_none=True)
@@ -74,6 +85,9 @@ def _flush_accumulated(
 
     if global_step % cfg.log_heavy_every == 0:
         tb.log_per_layer_grad_norms(module.model, global_step)
+
+    # ---- PhaseMemory gate monitoring (no impact on training) ----
+    _log_phase_memory_gate(module, tb, global_step)
 
     return global_step, avg_loss, updates
 
@@ -183,6 +197,13 @@ def run_basic_training_loop(
 
             loss = module.training_step(batch)
             loss = loss / cfg.gradient_accumulation_steps
+
+            # ---- DEBUG ----
+            if not torch.isfinite(loss):
+                print("\n[DEBUG] loss is NaN/Inf BEFORE backward!!")
+                print("[DEBUG] loss value:", loss.item())
+            # ---- END DEBUG ----
+
             loss.backward()
             accumulated_loss += loss.item()
             del loss
@@ -259,6 +280,8 @@ def run_basic_training_loop(
     final_loss = module.training_losses[-1] if module.training_losses else 0.0
 
     adapter_label = "LoKR" if trainer.adapter_type == "lokr" else "LoRA"
+    if trainer.adapter_type == "phase_memory":
+        adapter_label = "PhaseMemory"
     tb.flush()
     tb.close()
     yield TrainingUpdate(
@@ -269,3 +292,113 @@ def run_basic_training_loop(
         ),
         kind="complete",
     )
+
+
+# ---------------------------------------------------------------------------
+# PhaseMemory gate monitoring (no impact on training / no graph mutations)
+# ---------------------------------------------------------------------------
+
+def _log_phase_memory_gate(module: Any, tb: Any, global_step: int) -> None:
+    """Log gate statistics from any PhaseMemory sub-module found in the model.
+
+    Scans the model for PhaseMemory instances and logs:
+    - phase_memory/g_mean  (scalar write gate average)
+    - phase_memory/g_std   (scalar write gate std)
+    - phase_memory/r_mean  (scalar read gate average)
+    - phase_memory/r_std   (scalar read gate std)
+
+    If no PhaseMemory module is found, silently returns.
+    """
+    log_every = 50
+    if global_step % log_every != 0:
+        return
+
+    def _as_float(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 0:
+                return None
+            return float(value.detach().float().item())
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    stats: Dict[str, List[float]] = {
+        "g_mean": [],
+        "g_std": [],
+        "r_mean": [],
+        "r_std": [],
+        "omega_mean": [],
+        "omega_std": [],
+        "zmag_mean": [],
+        "zmag_max": [],
+    }
+
+    for child in module.model.modules():
+        if not isinstance(child, PhaseMemory):
+            continue
+        g_mean = _as_float(getattr(child, "last_g_mean", None))
+        g_std = _as_float(getattr(child, "last_g_std", None))
+        r_mean = _as_float(getattr(child, "last_r_mean", None))
+        r_std = _as_float(getattr(child, "last_r_std", None))
+        omega_mean = _as_float(getattr(child, "last_omega_mean", None))
+        omega_std = _as_float(getattr(child, "last_omega_std", None))
+        zmag_mean = _as_float(getattr(child, "last_zmag_mean", None))
+        zmag_max = _as_float(getattr(child, "last_zmag_max", None))
+
+        if g_mean is None:
+            continue
+
+        stats["g_mean"].append(g_mean)
+        stats["g_std"].append(g_std or 0.0)
+        stats["r_mean"].append(r_mean or 0.0)
+        stats["r_std"].append(r_std or 0.0)
+        stats["omega_mean"].append(omega_mean or 0.0)
+        stats["omega_std"].append(omega_std or 0.0)
+        stats["zmag_mean"].append(zmag_mean or 0.0)
+        stats["zmag_max"].append(zmag_max or 0.0)
+
+    if not stats["g_mean"]:
+        return
+
+    def _mean(values: List[float]) -> float:
+        return sum(values) / max(len(values), 1)
+
+    g_mean = _mean(stats["g_mean"])
+    g_std = _mean(stats["g_std"])
+    r_mean = _mean(stats["r_mean"])
+    r_std = _mean(stats["r_std"])
+    omega_mean = _mean(stats["omega_mean"])
+    omega_std = _mean(stats["omega_std"])
+    zmag_mean = _mean(stats["zmag_mean"])
+    zmag_max = _mean(stats["zmag_max"])
+
+    if any(math.isnan(v) for v in (g_mean, g_std, r_mean, r_std, omega_mean, omega_std, zmag_mean, zmag_max)):
+        logger.warning("[PM] NaN detected in PhaseMemory diagnostics")
+        return
+
+    logger.info(
+        "[PM] "
+        f"g={g_mean:.4f}±{g_std:.4f} "
+        f"r={r_mean:.4f}±{r_std:.4f} "
+        f"omega={omega_mean:.4f}±{omega_std:.4f} "
+        f"zmag={zmag_mean:.4f} "
+        f"zmax={zmag_max:.4f}"
+    )
+
+    if g_mean < 0.01:
+        logger.warning("[PM] Gate collapse detected (g_mean < 0.01)")
+    if g_mean > 0.99:
+        logger.warning("[PM] Gate saturation detected (g_mean > 0.99)")
+    if omega_mean < 1e-3:
+        logger.warning("[PM] Omega collapse detected (omega_mean < 1e-3)")
+    if zmag_max > 5.0:
+        logger.warning("[PM] zmag explosion detected (zmag_max > 5.0)")
+
+    if tb is not None:
+        tb.log_scalar("phase_memory/g_mean", g_mean, global_step)
+        tb.log_scalar("phase_memory/g_std", g_std, global_step)
+        tb.log_scalar("phase_memory/r_mean", r_mean, global_step)
+        tb.log_scalar("phase_memory/r_std", r_std, global_step)

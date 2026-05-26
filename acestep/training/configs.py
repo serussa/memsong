@@ -76,6 +76,28 @@ class LoKRConfig:
 
 
 @dataclass
+class PhaseMemoryConfig:
+    """Configuration for Phase Dynamics Memory training.
+
+    PhaseMemory is embedded directly in the DiT layers (no adapter injection).
+    Training freezes all model parameters except the PhaseMemory sub-modules.
+
+    Attributes:
+        mem_dim: Internal dimension for complex memory. Defaults to 2048.
+        init_scale: Scale for initializing memory state. Defaults to 0.01.
+    """
+    mem_dim: int = 128
+    init_scale: float = 0.01
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "mem_dim": self.mem_dim,
+            "init_scale": self.init_scale,
+        }
+
+
+@dataclass
 class TrainingConfig:
     """Configuration for LoRA training process.
     
