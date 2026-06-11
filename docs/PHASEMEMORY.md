@@ -122,7 +122,7 @@ ACESTEP_LOCAL_MODEL_CODE=1 SIDESTEP_SAFE_ROOT="/" python train.py --yes fixed \
     --checkpoint-dir /root/autodl-tmp/Ace-Step1.5/checkpoints \
     --model-variant sft \
     --dataset-dir /root/autodl-tmp/musicdata/train_tensors \
-    --output-dir /root/autodl-tmp/newest_checkpoints \
+    --output-dir /root/autodl-tmp/lyrics_checkpoints \
     --learning-rate 1e-4 \
     --batch-size 16 \
     --gradient-accumulation 1 \

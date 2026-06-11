@@ -4,6 +4,7 @@ ACE-Step 1.5 文本到音乐生成脚本（PhaseMemory 权重）
 使用本地下载的模型
 """
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -24,10 +25,24 @@ os.environ["ACESTEP_MINIMAL_COMPONENTS"] = "1"
 from acestep.handler import AceStepHandler
 from acestep.llm_inference import LLMHandler
 from acestep.inference import GenerationParams, GenerationConfig, generate_music
+from acestep.phase_memory import reset_phase_memory, set_phase_memory_scale
 from acestep.training.phase_memory_checkpoint import load_phase_memory_weights
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run inference with PhaseMemory")
+    parser.add_argument("--pm-scale", type=float, default=0.0, help="PhaseMemory scale")
+    parser.add_argument(
+        "--output-subdir",
+        type=str,
+        default=None,
+        help="Optional subdirectory under output/ for this run",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     print("=" * 70)
     print("ACE-Step 1.5 文本到音乐生成 (PhaseMemory)")
     print("=" * 70)
@@ -64,6 +79,10 @@ def main():
     except FileNotFoundError as exc:
         print(f"❌ PhaseMemory 权重未找到: {exc}")
         sys.exit(1)
+
+    set_phase_memory_scale(dit_handler.model, args.pm_scale)
+    reset_phase_memory(dit_handler.model)
+    print(f"✓ PhaseMemory scale set to {args.pm_scale}")
 
     # ========== 3/4. 初始化 5Hz LM 服务 ==========
     print("\n[3/4] 初始化 5Hz 语言模型...")
@@ -125,6 +144,8 @@ def main():
     print("=" * 70)
 
     output_dir = ACE_STEP_ROOT / "output"
+    if args.output_subdir:
+        output_dir = output_dir / args.output_subdir
     output_dir.mkdir(exist_ok=True)
 
     result = generate_music(
