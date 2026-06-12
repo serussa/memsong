@@ -185,6 +185,19 @@ class TrainingConfigV2(TrainingConfig):
     adapter types.  Ignored when adapter_type is 'lora' or 'lokr' only.
     """
 
+    # --- Beat alignment loss --------------------------------------------------
+    beat_align_lambda: float = 0.0
+    """Weight for beat phase alignment loss in PhaseMemory training.
+    0.0 = disabled (default).  Start tuning from 0.001 and adjust so that
+    L_phase ≈ 1%~10% of diffusion_loss.  Only effective when the training
+    samples have corresponding beat_phase .npy files.
+    """
+
+    beat_phase_dir: str = ""
+    """Directory containing beat_phase .npy files.  If empty, looks for .npy
+    files alongside the .pt tensors in dataset_dir.
+    """
+
     # --- Model / paths ------------------------------------------------------
     model_variant: str = "turbo"
     """Model variant: 'turbo', 'base', or 'sft'."""
@@ -307,6 +320,8 @@ class TrainingConfigV2(TrainingConfig):
                 "dataset_json": self.dataset_json,
                 "tensor_output": self.tensor_output,
                 "max_duration": self.max_duration,
+                "beat_align_lambda": self.beat_align_lambda,
+                "beat_phase_dir": self.beat_phase_dir,
             }
         )
         return base

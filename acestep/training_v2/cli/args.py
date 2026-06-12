@@ -247,6 +247,8 @@ def _add_common_training_args(parser: argparse.ArgumentParser) -> None:
     g_pm.add_argument("--phase-mem-dim", type=int, default=None, help="PhaseMemory internal dimension (default: hidden_size)")
     g_pm.add_argument("--phase-mem-init-scale", type=float, default=0.01, help="PhaseMemory state init scale (default: 0.01)")
     g_pm.add_argument("--phase-mem-lr-multiplier", type=float, default=1.0, help="LR multiplier for PhaseMemory params (default: 1.0)")
+    g_pm.add_argument("--beat-align-lambda", type=float, default=0.0, help="Weight for beat phase alignment loss (0=disabled). Start from 0.001 (default: 0.0)")
+    g_pm.add_argument("--beat-phase-dir", type=str, default="", help="Directory containing beat_phase .npy files (default: alongside .pt in dataset-dir)")
 
     # -- Checkpointing -------------------------------------------------------
     g_ckpt = parser.add_argument_group("Checkpointing")

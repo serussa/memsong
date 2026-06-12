@@ -190,6 +190,9 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
         dataset_json=args.dataset_json,
         tensor_output=args.tensor_output,
         max_duration=args.max_duration,
+        # Beat alignment
+        beat_align_lambda=getattr(args, "beat_align_lambda", 0.0),
+        beat_phase_dir=getattr(args, "beat_phase_dir", ""),
     )
 
     return adapter_cfg, train_cfg

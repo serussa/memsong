@@ -77,17 +77,17 @@ def main():
         task_type="text2music",
         
         # 文本输入
-        caption="ballad, pop, female vocal, piano, strings, drums, romantic, melancholic, 137 bpm, E major",
-        lyrics="""[Verse] 爱总忽然退潮 心慌乱触礁  沉没在深海里 看海面闪耀 但回忆像水草 紧紧的缠绕 梦才温热眼角 就冰冷掉 努力越过风暴 向着未来飘 我们才会遇到 感动的拥抱 你总是能知道 我的坚强剩多少 [Pre-chorus] 给我最刚好的依靠 [Chorus] 你手心的太阳 只轻放在我背上 委屈就能笑着落泪 被释放 在手心的太阳 黑暗里特别明亮 让远路好像 是一种分享 而不是漫长 [Inst] 让眼睛看不到 嫉妒的燃烧 [Verse] 让耳朵听不到 谎言的吵闹 再没有人相信 爱能永恒那一秒 我们正坚定的微笑 [Chorus] 你手心的太阳 有种安定的力量 就算世界再乱我也 不心慌 我手心的太阳 或许只像个月亮 却用所有爱 为你投射我最暖的光芒 你手心的太阳 只轻放在我背上 [Bridge] 委屈就能笑着落泪 被释放 在手心的太阳 黑暗里特别明亮 让远路好像 是一种分享 你手心的太阳 有种安定的力量 [Chorus] 就算世界再乱我也 不心慌 我手心的太阳 或许只像个月亮 却用所有爱 为你投射我 最暖的光芒
+        caption="ballad, pop, vocal, live recording, piano, rock band, drums, nostalgic, emotional, inspiring",
+        lyrics="""[Intro: Crowd Cheers & Piano] [Verse 1: Vocal] 你站在讲台上 把难题说得亮堂 一支笔一块黑板 照见我眼里的慌 你总把话说实在 像冬天一杯热汤 不绕弯不撞墙 把路给我摆在前方 [Pre-Chorus: Vocal] 那时候我害怕 怕未来太长 你一句别怂 我就敢往前闯 [Chorus: Vocal] 张雪峰老师 我还记得你 一句一句 把我拉出迷雾里 张雪峰老师 我还记得你 那些年少的愁 你替我扛起 [Instrumental Break: Pop Rock Band] [Verse 2: Vocal] 粉笔灰落在肩上 像雪一样安静 你笑着说前途远 别先把自个儿看轻 多少个深夜回家 我还在翻那页纸 你说过的每句话 都在我心里理清 [Pre-Chorus: Vocal] 后来风吹过来 我也学会了 不躲不退 往自己的山坡走 [Chorus: Vocal] 张雪峰老师 我还记得你 一句一句 把我拉出迷雾里 张雪峰老师 我还记得你 那些年少的愁 你替我扛起 [Bridge: Vocal] 如果有一天 我走得很远 也会想起那间教室的光线 想起你拍着桌子 说别怕吃苦 说这条路 总会有人走出去 [Chorus: Vocal] 张雪峰老师 我还记得你 一句一句 把我拉出迷雾里 张雪峰老师 我还记得你 那些年少的愁 你替我扛起 [Outro: Vocal] 张雪峰老师 我还记得你 风再大 我也会继续前进 张雪峰老师 我还记得你 你给过的勇气 我一直放在心里 [Music fades out]
 """,
         instrumental=False,  # False 表示有歌词
         
         # 音乐元数据（可选）
         bpm=137,
-        keyscale="E major",
-        timesignature="4",  # 4/4 拍
+        keyscale="",
+        timesignature="",  # 4/4 拍
         vocal_language="zh",  # 语言: 中文
-        duration=277,  # 3分钟的标准流行歌曲长度
+        duration=268,  # 3分钟的标准流行歌曲长度
         
         # 生成参数
         inference_steps=50,  # base 通常可用更多步数提升质量

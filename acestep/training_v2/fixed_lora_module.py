@@ -11,15 +11,17 @@ Fabric and basic training loops.
 
 from __future__ import annotations
 
+import math
 import logging
 from contextlib import nullcontext
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 # ACE-Step utilities
+from acestep.phase_memory import PhaseMemory
 from acestep.training.lora_injection import inject_lora_into_dit
 from acestep.training.lora_utils import check_peft_available
 from acestep.training.lokr_utils import (
@@ -347,7 +349,129 @@ class FixedLoRAModule(nn.Module):
             flow = x1 - x0
             diffusion_loss = F.mse_loss(decoder_outputs[0], flow)
 
+            # ---- Beat alignment loss (PhaseMemory only) --------------------
+            beat_align_lambda = getattr(
+                self.training_config, "beat_align_lambda", 0.0
+            )
+            if beat_align_lambda > 0.0:
+                has_bp = batch.get("has_beat_phase")
+                if has_bp is not None and has_bp.any().item():
+                    beat_phase = batch["beat_phase"].to(
+                        self.device, dtype=self.dtype, non_blocking=nb
+                    )
+                    has_bp = has_bp.to(self.device, non_blocking=nb)
+                    phase_loss = self._compute_beat_align_loss(
+                        beat_phase, attention_mask, has_bp,
+                    )
+                    if phase_loss is not None:
+                        diffusion_loss = (
+                            diffusion_loss
+                            + beat_align_lambda * phase_loss
+                        )
+
         # fp32 for stable backward
         diffusion_loss = diffusion_loss.float()
         self.training_losses.append(diffusion_loss.item())
         return diffusion_loss
+
+    # -----------------------------------------------------------------------
+    # Beat alignment loss
+    # -----------------------------------------------------------------------
+
+    def _compute_beat_align_loss(
+        self,
+        beat_phase: torch.Tensor,
+        attention_mask: torch.Tensor,
+        has_beat_phase: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """Huber loss between PhaseMemory delta_phi and beat-phase target.
+
+        Uses per-frame complex states stored by PhaseMemory during the
+        decoder forward.  beat_phase (at 25 Hz) is down-sampled to the
+        patched frame rate to match the internal DiT frame count.
+
+        Args:
+            beat_phase: [B, T_latent] beat phase in [0, 1).
+            attention_mask: [B, T_latent] padding mask (1=valid).
+            has_beat_phase: [B] bool mask per sample.
+
+        Returns:
+            Scalar loss tensor, or None if PhaseMemory / z states are absent.
+        """
+        # locate the PhaseMemory module inside the decoder
+        pm: Optional[PhaseMemory] = None
+        for module in self.model.modules():
+            if isinstance(module, PhaseMemory):
+                pm = module
+                break
+        if pm is None:
+            return None
+
+        zr_all = getattr(pm, "last_zr_all", None)
+        zi_all = getattr(pm, "last_zi_all", None)
+        if zr_all is None or zi_all is None:
+            return None
+
+        b = zr_all.shape[0]
+
+        # ---- delta_phi from adjacent frame pairs -------------------------
+        # zr_all / zi_all: [B, T_patched, M]
+        dot = (
+            zr_all[:, 1:, :] * zr_all[:, :-1, :]
+            + zi_all[:, 1:, :] * zi_all[:, :-1, :]
+        )  # [B, T-1, M]
+        cross = (
+            zr_all[:, 1:, :] * zi_all[:, :-1, :]
+            - zi_all[:, 1:, :] * zr_all[:, :-1, :]
+        )  # [B, T-1, M]
+        delta_phi = torch.atan2(cross, dot)  # [B, T-1, M]
+
+        # average over latent dimensions -> scalar per frame
+        delta_phi_scalar = delta_phi.mean(dim=-1)  # [B, T-1]
+
+        # ---- omega_target from beat_phase ---------------------------------
+        # beat_phase [B, T_latent] at 25 Hz  ->  patched frame rate
+        patch_size = getattr(self.config, "patch_size", 2)
+        T_latent = beat_phase.shape[1]
+
+        # match the padding that the decoder applies before Conv1d
+        pad_len = 0
+        if T_latent % patch_size != 0:
+            pad_len = patch_size - (T_latent % patch_size)
+        bp = F.pad(beat_phase, (0, pad_len), mode="constant", value=0.0)
+
+        # average over each patch window  [B, T_patched_eff]
+        bp = bp.view(b, -1, patch_size).mean(dim=-1)
+
+        # ---- target angular velocity --------------------------------------
+        delta = bp[:, 1:] - bp[:, :-1]  # [B, T_patched_eff - 1]
+        # wrap-around correction for beat-phase in [0, 1)
+        delta = torch.where(delta < -0.5, delta + 1.0, delta)
+        omega_target = 2.0 * math.pi * delta
+
+        # ---- align lengths (both start at frame 1) ------------------------
+        min_len = min(delta_phi_scalar.shape[1], omega_target.shape[1])
+        delta_phi_scalar = delta_phi_scalar[:, :min_len]
+        omega_target = omega_target[:, :min_len]
+
+        # ---- mask: only valid (non-padded) frames -------------------------
+        am = F.pad(attention_mask, (0, pad_len), mode="constant", value=0.0)
+        am = am.view(b, -1, patch_size).any(dim=-1).float()  # [B, T_patched]
+        # each loss term corresponds to the later frame of a pair
+        am = am[:, 1:1 + min_len].contiguous()
+
+        # per-sample availability mask
+        sample_mask = has_beat_phase.float().unsqueeze(-1)  # [B, 1]
+
+        # ---- Huber loss (delta=0.1, robust to beat-detection errors) ------
+        diff = delta_phi_scalar - omega_target
+        huber_delta = 0.1
+        phase_loss = torch.where(
+            diff.abs() < huber_delta,
+            0.5 * diff ** 2,
+            huber_delta * (diff.abs() - 0.5 * huber_delta),
+        )
+        phase_loss = (phase_loss * am * sample_mask).sum() / (
+            (am * sample_mask).sum().clamp(min=1)
+        )
+        return phase_loss
