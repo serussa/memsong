@@ -126,19 +126,30 @@ def load_phase_memory_weights(
     loaded_keys = 0
     skipped_keys = 0
 
+    def _normalize_key(key: str) -> str:
+        """Remove training wrapper artifacts from checkpoint key names."""
+        # decoder._forward_module.layers → decoder.layers
+        key = key.replace("._forward_module.", ".")
+        return key
+
     for key, tensor in state_dict.items():
-        if key in model_state:
-            if model_state[key].shape == tensor.shape:
-                model_state[key].copy_(tensor)
-                loaded_keys += 1
-            else:
-                logger.warning(
-                    "[WARN] Shape mismatch for %s: model=%s, weights=%s -- skipping",
-                    key, model_state[key].shape, tensor.shape,
-                )
+        # Try exact match first, then normalized
+        matched_key = key
+        if key not in model_state:
+            matched_key = _normalize_key(key)
+            if matched_key not in model_state:
+                logger.debug("[DEBUG] Key %s not found in model -- skipping", key)
                 skipped_keys += 1
+                continue
+
+        if model_state[matched_key].shape == tensor.shape:
+            model_state[matched_key].copy_(tensor)
+            loaded_keys += 1
         else:
-            logger.debug("[DEBUG] Key %s not found in model -- skipping", key)
+            logger.warning(
+                "[WARN] Shape mismatch for %s: model=%s, weights=%s -- skipping",
+                matched_key, model_state[matched_key].shape, tensor.shape,
+            )
             skipped_keys += 1
 
     logger.info(

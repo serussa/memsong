@@ -41,20 +41,17 @@ class PreprocessedTensorDataset(Dataset):
     - target_latents: VAE-encoded audio [T, 64]
     - encoder_hidden_states: Condition encoder output [L, D]
     - encoder_attention_mask: Condition mask [L]
-    - context_latents: Source context [T, 65]
+    - context_latents: Source context [T, 128]
     - attention_mask: Audio latent mask [T]
 
-    Optionally loads beat_phase from a separate beat_phase_dir.
     No VAE/text encoder needed during training - just load tensors directly!
     """
 
-    def __init__(self, tensor_dir: str, beat_phase_dir: str = ""):
+    def __init__(self, tensor_dir: str):
         """Initialize from a directory of preprocessed .pt files.
 
         Args:
             tensor_dir: Directory containing preprocessed .pt files and manifest.json
-            beat_phase_dir: Optional directory containing .npy beat phase files.
-                If empty, looks for .npy alongside the .pt files.
 
         Raises:
             ValueError: If tensor_dir is not an existing directory or escapes safe root.
@@ -63,7 +60,6 @@ class PreprocessedTensorDataset(Dataset):
         if not os.path.isdir(validated_dir):
             raise ValueError(f"Not an existing directory: {tensor_dir}")
         self.tensor_dir = validated_dir
-        self.beat_phase_dir = beat_phase_dir
         self.sample_paths: List[str] = []
         
         # Load manifest if exists
@@ -139,48 +135,45 @@ class PreprocessedTensorDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """Load a preprocessed tensor file.
 
-        Also attempts to load a corresponding beat_phase .npy file with the
-        same stem; if not found, stores an empty tensor (beat alignment loss
-        will be skipped for this sample).
-
         Returns:
-            Dictionary containing all pre-computed tensors for training
+            Dictionary containing all pre-computed tensors for training,
+            plus on-the-fly section_ids from metadata lyrics.
         """
         tensor_path = self.valid_paths[idx]
         data = torch.load(tensor_path, map_location='cpu', weights_only=True)
 
-        # Try to load beat phase from .npy file
-        if self.beat_phase_dir:
-            beat_phase_path = Path(self.beat_phase_dir) / (Path(tensor_path).stem + '.npy')
-        else:
-            beat_phase_path = Path(tensor_path).with_suffix('.npy')
-        if beat_phase_path.is_file():
-            beat_phase = torch.from_numpy(
-                np.load(str(beat_phase_path))
-            ).float()
-            has_beat_phase = True
-        else:
-            beat_phase = torch.empty(0)  # marker: no beat phase available
-            has_beat_phase = False
-
-        return {
+        result = {
             "target_latents": data["target_latents"],  # [T, 64]
             "attention_mask": data["attention_mask"],  # [T]
             "encoder_hidden_states": data["encoder_hidden_states"],  # [L, D]
             "encoder_attention_mask": data["encoder_attention_mask"],  # [L]
-            "context_latents": data["context_latents"],  # [T, 65]
-            "beat_phase": beat_phase,  # [T] or empty
-            "has_beat_phase": has_beat_phase,
+            "context_latents": data["context_latents"],  # [T, 128]
             "metadata": data.get("metadata", {}),
         }
+
+        # On-the-fly section_ids for Section-RoPE training
+        metadata = data.get("metadata", {})
+        lyrics_text = metadata.get("lyrics", "") if isinstance(metadata, dict) else ""
+        L = data["encoder_hidden_states"].shape[0]
+        if lyrics_text and L > 0:
+            if not hasattr(self, "_section_parser"):
+                from acestep.tgca.lyrics_parser import LyricsStructureParser
+                self._section_parser = LyricsStructureParser()
+            output = self._section_parser.parse(lyrics_text, num_chunks=L)
+            section_ids = output.section_type_ids.to(torch.long)
+            if section_ids.shape[0] != L:
+                section_ids = torch.full((L,), 0, dtype=torch.long)
+        else:
+            section_ids = torch.full((L,), 0, dtype=torch.long)
+        result["section_ids"] = section_ids
+
+        return result
 
 
 def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     """Collate function for preprocessed tensor batches.
 
     Handles variable-length tensors by padding to the longest in the batch.
-    beat_phase is padded to max_latent_len; empty tensors stay empty (marker
-    for "no beat phase available").
 
     Args:
         batch: List of sample dictionaries with pre-computed tensors
@@ -198,8 +191,6 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     encoder_hidden_states = []
     encoder_attention_masks = []
     context_latents = []
-    beat_phases = []
-    has_beat_phases = []
 
     for sample in batch:
         # Pad target_latents [T, 64] -> [max_T, 64]
@@ -216,7 +207,7 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
             am = torch.cat([am, pad], dim=0)
         attention_masks.append(am)
 
-        # Pad context_latents [T, 65] -> [max_T, 65]
+        # Pad context_latents [T, 128] -> [max_T, 128]
         cl = sample["context_latents"]
         if cl.shape[0] < max_latent_len:
             pad = cl.new_zeros(max_latent_len - cl.shape[0], cl.shape[1])
@@ -237,26 +228,23 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
             eam = torch.cat([eam, pad], dim=0)
         encoder_attention_masks.append(eam)
 
-        # Pad beat_phase [T] -> [max_T]
-        # Missing beat_phases are padded to full length with zeros
-        # and tracked via has_beat_phase.
-        bp = sample["beat_phase"]
-        if bp.numel() == 0:
-            bp = bp.new_zeros(max_latent_len)
-        elif bp.shape[0] < max_latent_len:
-            pad = bp.new_zeros(max_latent_len - bp.shape[0])
-            bp = torch.cat([bp, pad], dim=0)
-        beat_phases.append(bp)
-        has_beat_phases.append(sample["has_beat_phase"])
+    # Handle variable-length section_ids by padding
+    section_ids = []
+    for sample in batch:
+        sid = sample.get("section_ids")
+        if sid is None:
+            sid = torch.zeros(max_encoder_len, dtype=torch.long)
+        elif sid.shape[0] < max_encoder_len:
+            sid = torch.cat([sid, sid.new_zeros(max_encoder_len - sid.shape[0])], dim=0)
+        section_ids.append(sid)
 
     return {
         "target_latents": torch.stack(target_latents),  # [B, T, 64]
         "attention_mask": torch.stack(attention_masks),  # [B, T]
         "encoder_hidden_states": torch.stack(encoder_hidden_states),  # [B, L, D]
         "encoder_attention_mask": torch.stack(encoder_attention_masks),  # [B, L]
-        "context_latents": torch.stack(context_latents),  # [B, T, 65]
-        "beat_phase": torch.stack(beat_phases),  # [B, T]
-        "has_beat_phase": torch.tensor(has_beat_phases, dtype=torch.bool),  # [B]
+        "context_latents": torch.stack(context_latents),  # [B, T, 128]
+        "section_ids": torch.stack(section_ids),  # [B, L]
         "metadata": [s["metadata"] for s in batch],
     }
 
@@ -278,7 +266,6 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         persistent_workers: bool = True,
         pin_memory_device: str = "",
         val_split: float = 0.0,
-        beat_phase_dir: str = "",
     ):
         """Initialize the data module.
 
@@ -288,7 +275,6 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
             num_workers: Number of data loading workers
             pin_memory: Whether to pin memory for faster GPU transfer
             val_split: Fraction of data for validation (0 = no validation)
-            beat_phase_dir: Optional directory for beat_phase .npy files
         """
         if LIGHTNING_AVAILABLE:
             super().__init__()
@@ -301,7 +287,6 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         self.persistent_workers = persistent_workers
         self.pin_memory_device = pin_memory_device
         self.val_split = val_split
-        self.beat_phase_dir = beat_phase_dir
 
         self.train_dataset = None
         self.val_dataset = None
@@ -310,9 +295,7 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         """Setup datasets."""
         if stage == 'fit' or stage is None:
             # Create full dataset
-            full_dataset = PreprocessedTensorDataset(
-                self.tensor_dir, beat_phase_dir=self.beat_phase_dir,
-            )
+            full_dataset = PreprocessedTensorDataset(self.tensor_dir)
             
             # Split if validation requested
             if self.val_split > 0 and len(full_dataset) > 1:

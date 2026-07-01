@@ -89,7 +89,7 @@ class GenerationParams:
         use_cot_metas: Whether to let LLM generate music metadata via CoT reasoning.
         use_cot_caption: Whether to let LLM rewrite or format the input caption via CoT reasoning.
         use_cot_language: Whether to let LLM detect vocal language via CoT.
-    """
+        """
     # Required Inputs
     task_type: str = "text2music"
     instruction: str = "Fill the audio semantic mask based on the given conditions:"
@@ -156,7 +156,7 @@ class GenerationParams:
     lm_negative_prompt: str = "NO USER INPUT"
     use_cot_metas: bool = True
     use_cot_caption: bool = True
-    use_cot_lyrics: bool = False  # TODO: not used yet
+    use_cot_lyrics: bool = False
     use_cot_language: bool = True
     use_constrained_decoding: bool = True
 
@@ -588,6 +588,7 @@ def generate_music(
 
         # Phase 2: DiT music generation
         # Use seed_for_generation (from config.seed or params.seed) instead of params.seed for actual generation
+
         result = dit_handler.generate_music(
             captions=dit_input_caption,
             global_caption=params.global_caption,

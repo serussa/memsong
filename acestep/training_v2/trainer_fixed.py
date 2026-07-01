@@ -50,7 +50,7 @@ from acestep.training_v2.trainer_helpers import (
     save_final,
     verify_saved_adapter,
 )
-from acestep.training_v2.trainer_basic_loop import run_basic_training_loop, _log_phase_memory_gate
+from acestep.training_v2.trainer_basic_loop import run_basic_training_loop, _log_phase_memory_gate, _log_section_rope_diag
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +149,6 @@ class FixedLoRATrainer:
                 prefetch_factor=cfg.prefetch_factor if num_workers > 0 else None,
                 persistent_workers=cfg.persistent_workers if num_workers > 0 else False,
                 pin_memory_device=cfg.pin_memory_device,
-                beat_phase_dir=getattr(cfg, "beat_phase_dir", ""),
             )
             data_module.setup("fit")
 
@@ -377,6 +376,7 @@ class FixedLoRATrainer:
                     self.fabric.clip_gradients(
                         self.module.model.decoder, optimizer, max_norm=cfg.max_grad_norm,
                     )
+                    self.module._pmr_capture_grads()
                     optimizer.step()
                     scheduler.step()
                     global_step += 1
@@ -386,9 +386,12 @@ class FixedLoRATrainer:
                     if global_step % cfg.log_every == 0:
                         tb.log_loss(avg_loss, global_step)
                         tb.log_lr(_lr, global_step)
+
+                        msg = f"Epoch {epoch + 1}/{cfg.max_epochs}, Step {global_step}, Loss: {avg_loss:.4f}"
+
                         yield TrainingUpdate(
                             step=global_step, loss=avg_loss,
-                            msg=f"Epoch {epoch + 1}/{cfg.max_epochs}, Step {global_step}, Loss: {avg_loss:.4f}",
+                            msg=msg,
                             kind="step", epoch=epoch + 1, max_epochs=cfg.max_epochs, lr=_lr,
                             steps_per_epoch=steps_per_epoch,
                         )
@@ -397,6 +400,7 @@ class FixedLoRATrainer:
                         tb.log_per_layer_grad_norms(self.module.model, global_step)
 
                     _log_phase_memory_gate(self.module, tb, global_step)
+                    _log_section_rope_diag(self.module, tb, global_step)
 
                     optimizer.zero_grad(set_to_none=True)
                     epoch_loss += avg_loss
@@ -414,6 +418,7 @@ class FixedLoRATrainer:
                 self.fabric.clip_gradients(
                     self.module.model.decoder, optimizer, max_norm=cfg.max_grad_norm,
                 )
+                self.module._pmr_capture_grads()
                 optimizer.step()
                 scheduler.step()
                 global_step += 1
@@ -431,6 +436,7 @@ class FixedLoRATrainer:
                     )
 
                 _log_phase_memory_gate(self.module, tb, global_step)
+                _log_section_rope_diag(self.module, tb, global_step)
 
                 optimizer.zero_grad(set_to_none=True)
                 epoch_loss += avg_loss
@@ -485,7 +491,12 @@ class FixedLoRATrainer:
         self._save_final(final_path)
         final_loss = self.module.training_losses[-1] if self.module.training_losses else 0.0
 
-        adapter_label = "LoKR" if self.adapter_type == "lokr" else "LoRA"
+        adapter_labels = {
+            "lora": "LoRA", "lokr": "LoKR", "phase_memory": "PhaseMemory",
+            "section_rope": "Section-RoPE", "pmdc_clock": "PMDC Clock",
+            "pm_retrieval": "PM-Retrieval",
+        }
+        adapter_label = adapter_labels.get(self.adapter_type, "LoRA")
         tb.flush()
         tb.close()
         yield TrainingUpdate(

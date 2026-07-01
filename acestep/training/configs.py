@@ -182,3 +182,51 @@ class TrainingConfig:
             "log_every_n_steps": self.log_every_n_steps,
             "val_split": self.val_split,
         }
+
+
+@dataclass
+class PMDCConfig:
+    """Configuration for PMDC Residual Clock training.
+
+    PMDC is an external module that reads layer 12 hidden states via hook
+    and outputs a log-speed residual to warp duration-interval attention bias.
+
+    Attributes:
+        hidden_dim: Hidden dimension of the MLP clock.
+        beta_init: Initial beta value.
+        beta_max: Maximum beta value.
+        use_delta_h: Use temporal hidden difference as feature.
+        gate_init: Initial gate for duration bias.
+        sigma: Duration interval bias sigma.
+        lambda_: Duration interval bias lambda.
+        max_bias: Maximum duration bias clamp.
+        w_pbase: Weight for p_final ≈ p_base loss.
+        w_res: Speed residual L2 regularization weight.
+        w_smooth: Log-speed smoothness regularization weight.
+    """
+    hidden_dim: int = 128
+    beta_init: float = 0.05
+    beta_max: float = 0.15
+    use_delta_h: bool = True
+    gate_init: float = 0.35
+    sigma: float = 0.03
+    lambda_: float = 0.5
+    max_bias: float = 1.0
+    w_pbase: float = 0.005
+    w_res: float = 0.0
+    w_smooth: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "hidden_dim": self.hidden_dim,
+            "beta_init": self.beta_init,
+            "beta_max": self.beta_max,
+            "use_delta_h": self.use_delta_h,
+            "gate_init": self.gate_init,
+            "sigma": self.sigma,
+            "lambda_": self.lambda_,
+            "max_bias": self.max_bias,
+            "w_pbase": self.w_pbase,
+            "w_res": self.w_res,
+            "w_smooth": self.w_smooth,
+        }

@@ -4,6 +4,7 @@ import os
 import threading
 from typing import Any, Dict, List, Optional, Sequence
 
+import torch
 from loguru import logger
 
 # Maximum wall-clock seconds to wait for service_generate before declaring a hang.
