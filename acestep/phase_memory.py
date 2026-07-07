@@ -2414,10 +2414,27 @@ class TransportRetrievalAdapter(nn.Module):
         transport_sigma: float = 0.18,
         transport_qk_scale: float = 1.0,
 
+        # Transport mode: "sinkhorn" | "row_softmax" | "none"
+        transport_mode: str = "sinkhorn",
+
+        # Scoring mode: "classic" | "position_only"
+        scoring_mode: str = "classic",
+        use_pm_gate: bool = True,
+        gate_hidden_dim: int = 128,
+
         # RMS writer params
         write_alpha_init: float = 1e-4,
         write_alpha_max: float = 1e-3,
         writer_eps: float = 1e-6,
+
+        # QK residual scale + KL weight (position_only mode)
+        # Pi = Sinkhorn(base_logit + residual_scale * QK)
+        # loss += kl_weight * KL(Pi || Pi_prior)
+        residual_scale: float = 0.01,
+        kl_weight: float = 0.001,
+
+        # out_proj init (v6: 0.01 to ensure gradient flow)
+        out_proj_init_std: float = 0.01,
     ):
         super().__init__()
         self.d_r = d_r
@@ -2425,8 +2442,14 @@ class TransportRetrievalAdapter(nn.Module):
         self.sinkhorn_iters = sinkhorn_iters
         self.transport_sigma = transport_sigma
         self.transport_qk_scale = transport_qk_scale
+        self.transport_mode = transport_mode
+        self.scoring_mode = scoring_mode
+        self.use_pm_gate = use_pm_gate
         self.write_alpha_max = write_alpha_max
         self.writer_eps = writer_eps
+        self.residual_scale = residual_scale
+        self.kl_weight = kl_weight
+        self.out_proj_init_std = out_proj_init_std
 
         # PM state LayerNorm
         self.pm_state_norm = nn.LayerNorm(pm_dim)
@@ -2439,7 +2462,7 @@ class TransportRetrievalAdapter(nn.Module):
             nn.SiLU(),
         )
 
-        # Unit-side coordinate MLP
+        # Unit-side coordinate MLP (for position features in diagnostics)
         self.unit_coord_mlp = nn.Sequential(
             nn.Linear(3, coord_dim),
             nn.SiLU(),
@@ -2473,15 +2496,32 @@ class TransportRetrievalAdapter(nn.Module):
             nn.Linear(d_r * 2, d_r),
         )
 
+        # === Position-only mode: state-adaptive context gate ===
+        self.hidden_norm_for_gate = nn.LayerNorm(hidden_dim)
+        gate_in_dim = hidden_dim + pm_dim + coord_dim
+        self.gate_mlp = nn.Sequential(
+            nn.Linear(gate_in_dim, gate_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(gate_hidden_dim, d_r),
+        )
+
+        # Diagnostic storage (populated during eval when _diagnose=True)
+        self._diagnose: bool = False
+        self._diag_store: Dict[str, torch.Tensor] = {}
+
         # Output projection
         self.out_proj = nn.Linear(d_r, hidden_dim)
-        nn.init.normal_(self.out_proj.weight, std=1e-3)
+        nn.init.normal_(self.out_proj.weight, std=self.out_proj_init_std)
         nn.init.zeros_(self.out_proj.bias)
 
         # RMS writer alpha (learnable fraction of h_rms to write)
         init_prob = max(write_alpha_init / max(write_alpha_max, 1e-10), 1e-6)
         init_prob = min(init_prob, 0.999)
         self.write_logit = nn.Parameter(torch.tensor(math.log(init_prob / (1.0 - init_prob))))
+
+        # Silence/control unit embeddings
+        self.silence_embedding = nn.Parameter(torch.randn(1, 1, text_dim) * 0.02)
+        self.null_value = nn.Parameter(torch.zeros(1, 1, d_r))
 
     @property
     def write_alpha(self) -> torch.Tensor:
@@ -2498,6 +2538,8 @@ class TransportRetrievalAdapter(nn.Module):
         unit_mass: torch.Tensor,
         unit_section_id: Optional[torch.Tensor] = None,
         timestep_emb: Optional[torch.Tensor] = None,
+        unit_is_lyric: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, float]]:
         """
         Args:
@@ -2524,82 +2566,186 @@ class TransportRetrievalAdapter(nn.Module):
         if K == 0:
             return torch.zeros_like(hidden_states), torch.zeros(B, T_a, 0, device=device), {}
 
-        # ---- 1. Query ------------------------------------------------------------
-        pm_state = self.pm_state_norm(pm_state)
+        # ---- 0. Silence/control unit embedding replacement -------------------
+        if unit_is_lyric is not None:
+            unit_text_hidden = torch.where(
+                unit_is_lyric.unsqueeze(-1),
+                unit_text_hidden,
+                self.silence_embedding.expand(B, K, -1),
+            )
+
+        # ---- Shared: PM state, audio coord -----------------------------------
+        pm_state_n = self.pm_state_norm(pm_state)
 
         a_feat = torch.stack([p_audio, p_audio ** 2, 1.0 - p_audio], dim=-1)
         audio_coord = self.audio_coord_mlp(a_feat)
 
-        if timestep_emb is None:
-            t_emb = torch.zeros(B, T_a, self.time_dim, device=device, dtype=dtype)
-        elif timestep_emb.dim() == 2:
-            t_emb = timestep_emb.unsqueeze(1).expand(-1, T_a, -1)
-        else:
-            t_emb = timestep_emb
-
-        q_in = torch.cat([pm_state, audio_coord, t_emb], dim=-1)
-        q = F.normalize(self.q_mlp(q_in), dim=-1, p=2)
-
-        # ---- 2. Key / Value ------------------------------------------------------
-        u_feat = torch.stack([unit_c_pos, unit_c_pos ** 2, 1.0 - unit_c_pos], dim=-1)
-        unit_coord = self.unit_coord_mlp(u_feat)
-
-        sec_emb = self.section_embedding(unit_section_id.long()) if unit_section_id is not None \
-                  else torch.zeros(B, K, self.section_embedding.embedding_dim, device=device, dtype=dtype)
-
-        k_in = torch.cat([unit_text_hidden, unit_coord, sec_emb], dim=-1)
-        k = F.normalize(self.k_mlp(k_in), dim=-1, p=2)
+        # ---- Value (shared across modes) ------------------------------------
         v = self.v_mlp(unit_text_hidden)
+        if unit_is_lyric is not None:
+            v = torch.where(unit_is_lyric.unsqueeze(-1), v, self.null_value.expand(B, K, -1))
 
-        # ---- 3. Base cost (position distance) ------------------------------------
-        dist = p_audio[:, :, None] - unit_c_pos[:, None, :]  # [B, T, K]
+        # ---- Position cost (shared across modes) ----------------------------
+        dist = p_audio[:, :, None] - unit_c_pos[:, None, :]
         C = (dist / self.transport_sigma) ** 2
-        base_logit = -C  # negative cost: closer = higher logit
+        base_logit = -C
 
-        # ---- 4. Dynamic residual score ------------------------------------------
-        R = torch.matmul(q, k.transpose(-1, -2))  # [B, T, K]
-        R = R / math.sqrt(self.d_r)
-
-        # ---- 5. Combined transport logit -----------------------------------------
-        L = base_logit + self.transport_qk_scale * R
-
-        # ---- 6. Row mass (uniform over audio timesteps) --------------------------
+        # ---- Row mass (uniform) ---------------------------------------------
         nu = torch.full((B, T_a,), 1.0 / T_a, device=device, dtype=dtype)
 
-        # ---- 7. Log-domain Sinkhorn ----------------------------------------------
-        Pi, sinkhorn_info = log_sinkhorn(
-            L, nu, unit_mass,
-            iters=self.sinkhorn_iters,
-        )
+        # ---- Transport plan -------------------------------------------------
+        if self.scoring_mode == "position_only":
+            # --- QK residual (tiny learned correction to position prior) ---
+            if timestep_emb is None:
+                t_emb = torch.zeros(B, T_a, self.time_dim, device=device, dtype=dtype)
+            elif timestep_emb.dim() == 2:
+                t_emb = timestep_emb.unsqueeze(1).expand(-1, T_a, -1)
+            else:
+                t_emb = timestep_emb
 
-        # ---- 8. Context (per-audio-token, dividing by row mass) ------------------
-        ctx = torch.matmul(Pi, v)  # [B, T, d_r]
-        ctx = ctx / nu.unsqueeze(-1).clamp(min=1e-10)
+            q_in = torch.cat([pm_state_n, audio_coord, t_emb], dim=-1)
+            q = F.normalize(self.q_mlp(q_in), dim=-1, p=2)
 
-        # ---- 9. RMS-calibrated writer -------------------------------------------
-        raw_res = self.out_proj(ctx)  # [B, T, D]
+            u_feat = torch.stack([unit_c_pos, unit_c_pos ** 2, 1.0 - unit_c_pos], dim=-1)
+            unit_coord = self.unit_coord_mlp(u_feat)
+            sec_emb = self.section_embedding(unit_section_id.long()) if unit_section_id is not None \
+                      else torch.zeros(B, K, self.section_embedding.embedding_dim, device=device, dtype=dtype)
+
+            k_in = torch.cat([unit_text_hidden, unit_coord, sec_emb], dim=-1)
+            k = F.normalize(self.k_mlp(k_in), dim=-1, p=2)
+            R = torch.matmul(q, k.transpose(-1, -2))  # [B, T, K]
+
+            # Combined logit: prior + tiny learned correction
+            L = base_logit + self.residual_scale * R
+            Pi, sinkhorn_info = log_sinkhorn(L, nu, unit_mass, iters=self.sinkhorn_iters)
+            sinkhorn_info["transport_mode"] = 0.0
+
+            # --- KL(Pi || Pi_prior) constraint ---
+            with torch.no_grad():
+                Pi_prior, _ = log_sinkhorn(base_logit, nu, unit_mass, iters=self.sinkhorn_iters)
+            Pi_safe = Pi.clamp(min=1e-30)
+            Pi_prior_safe = Pi_prior.clamp(min=1e-30)
+            kl_loss = (Pi_safe.detach() * (torch.log(Pi_safe) - torch.log(Pi_prior_safe))).sum(dim=(-2, -1)).mean()
+            self._last_kl_loss = kl_loss
+
+            # ---- Diagnostic storage (eval only) --------------------------------
+            if self._diagnose and not self.training:
+                self._diag_store.update({
+                    "L_prior": base_logit.detach().cpu(),
+                    "score_qk": R.detach().cpu(),
+                    "residual_logits": (self.residual_scale * R).detach().cpu(),
+                    "L_corr": L.detach().cpu(),
+                    "Pi_prior": Pi_prior.detach().cpu(),
+                    "Pi_corr": Pi.detach().cpu(),
+                    "nu": nu.detach().cpu(),
+                    "unit_mass": unit_mass.detach().cpu(),
+                    "unit_c_pos": unit_c_pos.detach().cpu(),
+                    "p_audio": p_audio.detach().cpu(),
+                    "h": hidden_states.detach().cpu(),
+                "hidden_states": hidden_states.detach().cpu(),
+                    "delta_h": None,  # filled after writer
+                })
+
+            ctx = torch.matmul(Pi, v)
+            ctx = ctx / nu.unsqueeze(-1).clamp(min=1e-10)
+
+            if self.use_pm_gate:
+                h_norm = self.hidden_norm_for_gate(hidden_states)
+                gate_in = torch.cat([h_norm, pm_state_n, audio_coord], dim=-1)
+                gate = torch.sigmoid(self.gate_mlp(gate_in))
+            else:
+                gate = torch.ones(B, T_a, self.v_mlp[-1].out_features, device=device, dtype=dtype)
+            ctx = ctx * gate
+        else:
+            # Classic mode: QK + position in Sinkhorn
+            if timestep_emb is None:
+                t_emb = torch.zeros(B, T_a, self.time_dim, device=device, dtype=dtype)
+            elif timestep_emb.dim() == 2:
+                t_emb = timestep_emb.unsqueeze(1).expand(-1, T_a, -1)
+            else:
+                t_emb = timestep_emb
+
+            q_in = torch.cat([pm_state_n, audio_coord, t_emb], dim=-1)
+            q = F.normalize(self.q_mlp(q_in), dim=-1, p=2)
+
+            u_feat = torch.stack([unit_c_pos, unit_c_pos ** 2, 1.0 - unit_c_pos], dim=-1)
+            unit_coord = self.unit_coord_mlp(u_feat)
+            sec_emb = self.section_embedding(unit_section_id.long()) if unit_section_id is not None \
+                      else torch.zeros(B, K, self.section_embedding.embedding_dim, device=device, dtype=dtype)
+
+            k_in = torch.cat([unit_text_hidden, unit_coord, sec_emb], dim=-1)
+            k = F.normalize(self.k_mlp(k_in), dim=-1, p=2)
+            R = torch.matmul(q, k.transpose(-1, -2))
+            R = R / math.sqrt(self.d_r)
+
+            L = base_logit + self.transport_qk_scale * R
+
+            if self.transport_mode == "row_softmax":
+                A = torch.softmax(L, dim=-1)
+                Pi = nu.unsqueeze(-1) * A
+                sinkhorn_info = {"row_error": 0.0, "col_error": 0.0,
+                                 "entropy": (-Pi * (Pi + 1e-10).log()).sum(dim=-1).mean().item(),
+                                 "sinkhorn_has_nan": 0.0, "transport_mode": 1.0}
+            elif self.transport_mode == "none":
+                return torch.zeros_like(hidden_states), torch.zeros(B, T_a, K, device=device), {"transport_mode": 2.0}
+            else:
+                Pi, sinkhorn_info = log_sinkhorn(L, nu, unit_mass, iters=self.sinkhorn_iters)
+                sinkhorn_info["transport_mode"] = 0.0
+
+            ctx = torch.matmul(Pi, v)
+            ctx = ctx / nu.unsqueeze(-1).clamp(min=1e-10)
+            gate = torch.ones_like(ctx)
+
+        # ---- RMS-calibrated writer -----------------------------------------
+        raw_res = self.out_proj(ctx)
         raw_rms = torch.sqrt(raw_res.pow(2).mean(dim=-1, keepdim=True) + self.writer_eps)
         unit_res = raw_res / raw_rms
         h_rms = torch.sqrt(hidden_states.pow(2).mean(dim=-1, keepdim=True)).detach()
         wa = self.write_alpha
         delta_h = wa * h_rms * unit_res
 
-        # ---- 10. Diagnostics ------------------------------------------------------
+        # ---- Fill diagnostic storage (eval only) ---------------------------
+        if self._diagnose and not self.training:
+            if "delta_h" in self._diag_store:
+                self._diag_store["delta_h"] = delta_h.detach().cpu()
+            self._diag_store["write_alpha"] = wa.detach().cpu()
+
+        # ---- Diagnostics ----------------------------------------------------
         with torch.no_grad():
             diag: Dict[str, float] = dict(sinkhorn_info)
             diag["transport_max"] = Pi.max().item()
             diag["transport_mean"] = Pi.mean().item()
-            diag["qk_std"] = R.std().item()
-            diag["base_logit_std"] = base_logit.std().item()
-            diag["transport_qk_ratio"] = (R.std() / (base_logit.std() + 1e-8)).item()
             diag["write_alpha"] = wa.item()
+            diag["write_alpha_max"] = self.write_alpha_max
+
+            if self.scoring_mode == "position_only":
+                diag["gate_mean"] = gate.mean().item()
+                diag["gate_std"] = gate.std().item()
+                diag["gate_min"] = gate.min().item()
+                diag["gate_max"] = gate.max().item()
+                diag["ctx_rms_before_gate"] = torch.sqrt((ctx / gate.clamp(min=1e-10)).pow(2).mean()).item()
+                diag["ctx_rms_after_gate"] = ctx.pow(2).mean().sqrt().item()
+            else:
+                diag["gate_mean"] = 1.0
+                diag["q_norm_mean"] = q.norm(dim=-1).mean().item() if q.numel() else 0.0
+                diag["k_norm_mean"] = k.norm(dim=-1).mean().item() if k.numel() else 0.0
+                diag["R_std"] = R.std().item() if R.numel() else 0.0
+                diag["base_logit_std"] = base_logit.std().item()
+                diag["effective_qk_ratio"] = (R.std() / (base_logit.std() + 1e-8)).item() if R.numel() else 0.0
+
+            diag["delta_h_rms"] = delta_h.pow(2).mean().sqrt().item()
+            diag["hidden_rms"] = h_rms.mean().item()
             diag["write_ratio"] = (delta_h.norm(dim=-1).mean() / (hidden_states.norm(dim=-1).mean() + 1e-8)).item()
-            diag["hidden_delta_norm"] = delta_h.norm(dim=-1).mean().item()
-            diag["raw_res_norm"] = raw_res.norm(dim=-1).mean().item()
-            diag["unit_mass_min"] = unit_mass.min().item() if K > 0 else 0.0
-            diag["unit_mass_max"] = unit_mass.max().item() if K > 0 else 0.0
-            diag["final_output_delta_ratio"] = diag["write_ratio"]
-            diag["has_nan"] = float(not (torch.isfinite(delta_h).all() and torch.isfinite(Pi).all() and torch.isfinite(raw_res).all()))
+
+            if unit_is_lyric is not None and K > 0:
+                silence_mask = (~unit_is_lyric).float()
+                col_mass = Pi.sum(dim=1)
+                leakage = (col_mass * silence_mask).sum(dim=-1).mean().item()
+                diag["non_lyric_leakage"] = leakage
+            else:
+                diag["non_lyric_leakage"] = 0.0
+            diag["delta_h_has_nan"] = float(not torch.isfinite(delta_h).all())
+            diag["sinkhorn_has_nan"] = float(not torch.isfinite(Pi).all())
 
         return delta_h, Pi, diag
 

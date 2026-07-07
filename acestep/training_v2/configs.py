@@ -211,15 +211,29 @@ class TrainingConfigV2(TrainingConfig):
     pmdc_w_smooth: float = 0.0
     use_controlled_pm: bool = False
 
+    # --- Step-based checkpointing ----------------------------------------------
+    save_every_n_steps: int = 500
+    """Save a checkpoint every N training steps (default: 500)."""
+
     # --- Transport retrieval-specific params -----------------------------------
     use_transport_retrieval: bool = False
     """Enable unit-level Sinkhorn transport retrieval (replaces token softmax)."""
+    transport_mode: str = "sinkhorn"
+    """Transport mode: 'sinkhorn', 'row_softmax', or 'none'."""
     sinkhorn_iters: int = 5
     """Number of log-domain Sinkhorn iterations."""
     transport_sigma: float = 0.18
     """Gaussian width for position-based transport cost."""
     transport_qk_scale: float = 1.0
-    """Scale factor for dynamic QK residual in transport logit."""
+    """Scale factor for dynamic QK residual in transport logit.  CLI --transport-qk-scale overrides."""
+
+    # --- State-adaptive scoring params (scoring_mode="position_only") ----------
+    scoring_mode: str = "classic"
+    """Scoring mode: 'classic' (-C + qk_scale*R) or 'position_only' (Pi from pos, PM gate after)."""
+    use_pm_gate: bool = True
+    """Use PM/hidden-state gate to modulate transported context. False = pure Sinkhorn-only baseline."""
+    gate_hidden_dim: int = 128
+    """Hidden dim for gate_mlp in position_only mode."""
 
     # --- PM-Retrieval-specific params -----------------------------------------
     retrieval_adapter_layers: str = "12"
@@ -248,6 +262,8 @@ class TrainingConfigV2(TrainingConfig):
     """Initial value for the learnable gamma_r gate parameter."""
     residual_scale: float = 0.1
     """Tanh-bounded residual scale factor."""
+    kl_weight: float = 0.001
+    """Weight for KL(Pi || Pi_prior) constraint in transport retrieval."""
     retrieval_adapter_time_dim: int = 128
     """Timestep embedding dimension fed into the retrieval query MLP."""
 
@@ -270,10 +286,14 @@ class TrainingConfigV2(TrainingConfig):
     # --- V4: RMS writer config -------------------------------------------------
     use_rms_writer: bool = True
     """Enable RMS-calibrated residual writer (v4)."""
-    write_alpha_init: float = 1e-4
-    """Initial write_alpha (fraction of h_rms to write)."""
-    write_alpha_max: float = 1e-3
+    write_alpha_init: float = 0.001
+    """Initial write_alpha (fraction of h_rms to write).  v6-smoke: 0.001 (was 1e-4)."""
+    write_alpha_max: float = 0.01
     """Maximum write_alpha (upper bound via sigmoid)."""
+
+    # --- V6: out_proj init ----------------------------------------------------
+    out_proj_init_std: float = 0.01
+    """Init std for TransportRetrievalAdapter.out_proj.  v6: 0.01 (was 1e-3)."""
 
     # --- Model / paths ------------------------------------------------------
     model_variant: str = "turbo"
@@ -345,6 +365,10 @@ class TrainingConfigV2(TrainingConfig):
     max_duration: float = 240.0
     """Maximum audio duration in seconds (preprocessing)."""
 
+    # --- Step limit (for smoke tests) ----------------------------------------
+    max_train_steps: Optional[int] = None
+    """If set, stop training after this many global steps.  Useful for smoke tests."""
+
     # -----------------------------------------------------------------------
     # Helpers
     # -----------------------------------------------------------------------
@@ -399,6 +423,7 @@ class TrainingConfigV2(TrainingConfig):
                 "max_duration": self.max_duration,
                 # Transport retrieval params
                 "use_transport_retrieval": self.use_transport_retrieval,
+                "transport_mode": self.transport_mode,
                 "sinkhorn_iters": self.sinkhorn_iters,
                 "transport_sigma": self.transport_sigma,
                 "transport_qk_scale": self.transport_qk_scale,
@@ -428,6 +453,13 @@ class TrainingConfigV2(TrainingConfig):
                 "use_rms_writer": self.use_rms_writer,
                 "write_alpha_init": self.write_alpha_init,
                 "write_alpha_max": self.write_alpha_max,
+                "out_proj_init_std": self.out_proj_init_std,
+                "max_train_steps": self.max_train_steps,
+                "save_every_n_steps": self.save_every_n_steps,
+                # State-adaptive scoring
+                "scoring_mode": self.scoring_mode,
+                "use_pm_gate": self.use_pm_gate,
+                "gate_hidden_dim": self.gate_hidden_dim,
             }
         )
         return base

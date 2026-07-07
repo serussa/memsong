@@ -178,6 +178,8 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
         transport_sigma=getattr(args, "transport_sigma", 0.18),
         transport_qk_scale=getattr(args, "transport_qk_scale", 1.0),
         retrieval_adapter_dim=getattr(args, "retrieval_adapter_dim", 256),
+        residual_scale=getattr(args, "residual_scale", 0.01),
+        kl_weight=getattr(args, "kl_weight", 0.001),
         shift=getattr(args, "shift", 3.0),
         num_inference_steps=getattr(args, "num_inference_steps", 8),
         learning_rate=args.learning_rate,

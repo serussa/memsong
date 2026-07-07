@@ -10,6 +10,7 @@ the Fabric loop, but uses manual ``loss.backward()`` and
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
@@ -147,6 +148,8 @@ def run_basic_training_loop(
 
     steps_per_epoch = max(1, math.ceil(len(train_loader) / cfg.gradient_accumulation_steps))
     total_steps = steps_per_epoch * cfg.max_epochs
+    save_every_n_steps = getattr(cfg, 'save_every_n_steps', 500)
+    best_loss = float('inf')
 
     scheduler = build_scheduler(
         optimizer,
@@ -227,8 +230,41 @@ def run_basic_training_loop(
                 accumulated_loss = 0.0
                 accumulation_step = 0
 
+                # Step limit for smoke tests
+                max_steps = getattr(cfg, 'max_train_steps', None)
+                if max_steps is not None and global_step >= max_steps:
+                    print(f"\n[INFO] Reached max_train_steps={max_steps}, stopping")
+                    yield TrainingUpdate(global_step, avg_loss,
+                                         f"[INFO] Reached max_train_steps={max_steps}",
+                                         kind="complete")
+                    tb.close()
+                    return
+
                 if torch.cuda.is_available() and global_step % cfg.log_every == 0:
                     torch.cuda.empty_cache()
+
+                # Step-based checkpoint (every 500 steps)
+                if global_step > 0 and global_step % save_every_n_steps == 0:
+                    ckpt_dir = str(output_dir / "checkpoints" / f"step_{global_step}_loss_{avg_loss:.4f}")
+                    save_checkpoint(trainer, optimizer, scheduler, epoch + 1, global_step, ckpt_dir)
+                    pm_diag = getattr(module, 'pm_diag', None)
+                    if pm_diag:
+                        (Path(ckpt_dir) / "diagnostics.json").write_text(json.dumps(pm_diag, indent=2))
+                    yield TrainingUpdate(
+                        step=global_step, loss=avg_loss,
+                        msg=f"[OK] Step checkpoint saved at step {global_step}",
+                        kind="checkpoint", epoch=epoch + 1, max_epochs=cfg.max_epochs,
+                        checkpoint_path=ckpt_dir,
+                    )
+
+                # Best-loss checkpoint
+                if avg_loss < best_loss:
+                    best_loss = avg_loss
+                    best_dir = str(output_dir / "checkpoints" / "best_loss")
+                    save_checkpoint(trainer, optimizer, scheduler, epoch + 1, global_step, best_dir)
+                    pm_diag = getattr(module, 'pm_diag', None)
+                    if pm_diag:
+                        (Path(best_dir) / "diagnostics.json").write_text(json.dumps(pm_diag, indent=2))
 
         # Flush remainder
         if accumulation_step > 0:

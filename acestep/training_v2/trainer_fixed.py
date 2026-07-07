@@ -251,6 +251,10 @@ class FixedLoRATrainer:
         # -- TensorBoard logger ---------------------------------------------
         tb = TrainingLogger(cfg.effective_log_dir)
 
+        # -- Step-based checkpoint config -----------------------------------
+        SAVE_EVERY_N_STEPS = getattr(cfg, 'save_every_n_steps', 500)
+        best_loss = float('inf')
+
         # -- Dataloader -----------------------------------------------------
         train_loader = data_module.train_dataloader()
 
@@ -412,6 +416,32 @@ class FixedLoRATrainer:
                     # memory fragmentation on consumer GPUs.
                     if torch.cuda.is_available() and global_step % cfg.log_every == 0:
                         torch.cuda.empty_cache()
+
+                    # Step-based checkpoint (every 500 steps)
+                    if global_step > 0 and global_step % SAVE_EVERY_N_STEPS == 0:
+                        ckpt_dir = str(output_dir / "checkpoints" / f"step_{global_step}_loss_{avg_loss:.4f}")
+                        self._save_checkpoint(optimizer, scheduler, epoch + 1, global_step, ckpt_dir)
+                        # Save diagnostics alongside checkpoint
+                        pm_diag = getattr(self.module, 'pm_diag', None)
+                        if pm_diag:
+                            import json
+                            (Path(ckpt_dir) / "diagnostics.json").write_text(json.dumps(pm_diag, indent=2))
+                        yield TrainingUpdate(
+                            step=global_step, loss=avg_loss,
+                            msg=f"[OK] Step checkpoint saved at step {global_step}",
+                            kind="checkpoint", epoch=epoch + 1, max_epochs=cfg.max_epochs,
+                            checkpoint_path=ckpt_dir,
+                        )
+
+                    # Best-loss checkpoint (save on improvement)
+                    if avg_loss < best_loss:
+                        best_loss = avg_loss
+                        best_dir = str(output_dir / "checkpoints" / "best_loss")
+                        self._save_checkpoint(optimizer, scheduler, epoch + 1, global_step, best_dir)
+                        pm_diag = getattr(self.module, 'pm_diag', None)
+                        if pm_diag:
+                            import json
+                            (Path(best_dir) / "diagnostics.json").write_text(json.dumps(pm_diag, indent=2))
 
             # Flush remainder
             if accumulation_step > 0:

@@ -498,8 +498,14 @@ class FixedLoRAModule(nn.Module):
                 sinkhorn_iters=getattr(cfg, 'sinkhorn_iters', 5),
                 transport_sigma=getattr(cfg, 'transport_sigma', 0.18),
                 transport_qk_scale=getattr(cfg, 'transport_qk_scale', 1.0),
+                scoring_mode=getattr(cfg, 'scoring_mode', 'classic'),
+                use_pm_gate=getattr(cfg, 'use_pm_gate', True),
+                gate_hidden_dim=getattr(cfg, 'gate_hidden_dim', 128),
                 write_alpha_init=getattr(cfg, 'write_alpha_init', 1e-4),
                 write_alpha_max=getattr(cfg, 'write_alpha_max', 1e-3),
+                out_proj_init_std=getattr(cfg, 'out_proj_init_std', 0.01),
+                residual_scale=getattr(cfg, 'residual_scale', 0.01),
+                kl_weight=getattr(cfg, 'kl_weight', 0.001),
             ).to(self.device).float()
             logger.info("[Transport] TransportRetrievalAdapter created: K_dim=%d sinkhorn_iters=%d sigma=%.3f qk_scale=%.2f",
                         64, getattr(cfg, 'sinkhorn_iters', 5),
@@ -756,6 +762,13 @@ class FixedLoRAModule(nn.Module):
         flow = x1 - x0
         flow_loss = F.mse_loss(decoder_outputs[0], flow)
         loss = flow_loss
+
+        # ---- KL constraint (if adapter computed one) ---------------------------
+        if hasattr(adapt, '_last_kl_loss') and adapt._last_kl_loss is not None:
+            kl_val = adapt._last_kl_loss
+            kl_w = getattr(adapt, 'kl_weight', 0.001)
+            loss = loss + kl_w * kl_val
+            adapter_diag['kl_loss'] = kl_val.detach().item()
 
         # ---- Step 7: Parameter tracking (before step 0 clone, after step 20 delta) ---
         pm = self.model._pmr["pm"]
