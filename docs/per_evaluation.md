@@ -91,6 +91,89 @@ PER 评估复用 `Muse/eval_pipeline/` 下的流水线：
 - `ref_phonemes`：GT 音素序列
 - `hyp_phonemes`：转录音素序列
 
+## 长程 PER 评估（分段指标）
+
+### 概述
+
+长程 PER (`calc_per_long.py`) 在原有整体 PER 基础上，增加了按歌词位置分段的评估能力。
+
+核心改进：
+- **不截断**：使用完整的参考歌词和 ASR 转写，不允许按最短长度截断
+- **全局对齐**：对完整音素序列做一次 Levenshtein 对齐，而不是分段独立计算
+- **分段统计**：按参考音素位置均分 Early / Middle / Late 三段，在同一次全局对齐中分别统计每段的 S/D/I
+- **Insertion 归属**：根据全局对齐中的相邻参考位置归入对应分段，而非分段独立对齐
+
+### 分段指标
+
+| 指标 | 说明 |
+|------|------|
+| Overall PER | 整句音素错误率 (S+D+I)/N |
+| Early PER | 前 1/3 歌词位置的音素错误率 |
+| Middle PER | 中间 1/3 歌词位置的音素错误率 |
+| Late PER | 后 1/3 歌词位置的音素错误率 |
+| LDG | Late PER - Early PER，正数表示结尾比开头差 |
+
+### 数据流
+
+```
+完整参考歌词 ──→ 音素转换 ──→ ┐
+                                ├──→ 一次全局 Levenshtein 对齐 ──→ 分段 S/D/I 统计
+完整 ASR 转写 ──→ 音素转换 ──→ ┘
+```
+
+### 使用方法
+
+```bash
+python Muse/eval_pipeline/calc_per_long.py \
+    --hyp_file <ASR转写.jsonl> \
+    --gt_file <GT歌词.jsonl> \
+    --model_name <模型名> \
+    --output_dir <输出目录>
+```
+
+### 一键评估
+
+```bash
+bash scripts/run_per_long.sh \
+    <ASR转写.jsonl> <GT歌词.jsonl> <output_dir> [model_name]
+```
+
+### 输出格式
+
+`songs.jsonl`（每首歌的明细）：
+```
+{"file_name": "000000.wav", "file_index": 0, "overall_per": 0.5132,
+ "early_per": 0.4800, "middle_per": 0.5200, "late_per": 0.5400,
+ "ldg": 0.0600, "original_per": 0.5132,
+ "ref_phonemes": "...", "hyp_phonemes": "...", ...}
+```
+
+`summary.csv`（模型级汇总）：
+
+| model | metric | mean | std | count |
+|-------|--------|------|-----|-------|
+| my_model | overall_per | 0.5132 | 0.1200 | 50 |
+| my_model | early_per | 0.4900 | 0.1100 | 50 |
+| my_model | middle_per | 0.5200 | 0.1300 | 50 |
+| my_model | late_per | 0.5300 | 0.1400 | 50 |
+| my_model | ldg | 0.0400 | 0.0800 | 50 |
+| my_model | original_per | 0.5132 | 0.1200 | 50 |
+
+### 相关脚本
+
+| 脚本 | 路径 | 说明 |
+|------|------|------|
+| Long-form PER 计算 | `Muse/eval_pipeline/calc_per_long.py` | 全局对齐 + 分段 PER |
+| Original PER 计算 | `Muse/eval_pipeline/calc_per.py` | 原版整体 PER |
+| 音素工具 | `Muse/eval_pipeline/phoneme_utils.py` | 中英文音素转换 |
+| 入口脚本 | `scripts/run_per_long.sh` | 一键运行分段 PER |
+
+### 最小测试
+
+```bash
+python Muse/eval_pipeline/calc_per_long.py --test
+```
+
 ## 注意事项
 
 - 需要 GPU（显存 ≥ 6GB），Qwen3-ASR 模型约占用 4-5GB
