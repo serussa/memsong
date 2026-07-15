@@ -280,6 +280,38 @@ def _add_common_training_args(parser: argparse.ArgumentParser) -> None:
     g_ckpt.add_argument("--output-dir", type=str, required=True, help="Output directory for LoRA weights")
     g_ckpt.add_argument("--save-every", type=int, default=10, help="Save checkpoint every N epochs (default: 10)")
     g_ckpt.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint dir to resume from")
+    g_ckpt.add_argument("--max-train-steps", type=int, default=None, help="Max training steps (for smoke tests; None = unlimited)")
+
+    # -- Transport checkpoint for TSM ----------------------------------------
+    g_tckpt = parser.add_argument_group("Transport checkpoint (for TSM experiments)")
+    g_tckpt.add_argument("--transport-ckpt", type=str, default=None,
+                         help="Path to pretrained transport checkpoint (PM + adapter weights)")
+
+    # -- TSM (Transported Structural Memory) ----------------------------------
+    g_tsm = parser.add_argument_group("TSM (Transported Structural Memory)")
+    g_tsm.add_argument("--use-tsm", action="store_true", default=False,
+                       help="Enable Transported Structural Memory module")
+    g_tsm.add_argument("--tsm-mode", type=str, default="sinkhorn_tsm",
+                       choices=["sinkhorn_only", "sinkhorn_pool_broadcast", "sinkhorn_tsm", "softmax_tsm"],
+                       help="TSM mode (default: sinkhorn_tsm)")
+    g_tsm.add_argument("--tsm-layers", type=str, default="12",
+                       help="Comma-separated layer indices for TSM injection (default: 12)")
+    g_tsm.add_argument("--tsm-memory-dim", type=int, default=256,
+                       help="TSM structural slot memory dimension (default: 256)")
+    g_tsm.add_argument("--tsm-num-heads", type=int, default=4,
+                       help="Number of attention heads in TSM slot mixer (default: 4)")
+    g_tsm.add_argument("--tsm-ffn-dim", type=int, default=512,
+                       help="Hidden dimension of TSM slot mixer FFN (default: 512)")
+    g_tsm.add_argument("--tsm-slot-layers", type=int, default=1,
+                       help="Number of TSM slot transformer layers (default: 1)")
+    g_tsm.add_argument("--tsm-dropout", type=float, default=0.0,
+                       help="Dropout rate in TSM slot mixer (default: 0.0)")
+    g_tsm.add_argument("--tsm-detach-coupling", action=argparse.BooleanOptionalAction, default=True,
+                       help="Detach coupling before TSM forward (default: True)")
+    g_tsm.add_argument("--tsm-zero-init-output", action=argparse.BooleanOptionalAction, default=True,
+                       help="Zero-initialise TSM output projection (default: True)")
+    g_tsm.add_argument("--tsm-enable-slot-mixer", action=argparse.BooleanOptionalAction, default=True,
+                       help="Enable slot mixer in TSM (default: True)")
 
     # -- Logging / TensorBoard -----------------------------------------------
     g_log = parser.add_argument_group("Logging / TensorBoard")

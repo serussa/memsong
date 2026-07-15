@@ -207,9 +207,21 @@ def save_adapter_flat(trainer: Any, output_dir: str) -> None:
             "retrieval_adapter": adapt_sd,
         }
 
+        # ---- TSM module (optional) ------------------------------------------
+        tsm = getattr(module.model, 'tsm_module', None)
+        if tsm is not None:
+            state["tsm_module"] = tsm.state_dict()
+            state["tsm_mode"] = getattr(module.model, '_tsm_mode', 'sinkhorn_tsm')
+            logger.info("[TSM] Including TSM in checkpoint (mode=%s, %d tensors)",
+                        state["tsm_mode"], len(state["tsm_module"]))
+
         # Validate
         tensor_count = len(pm_sd) + len(adapt_sd)
         param_count = sum(t.numel() for t in pm_sd.values()) + sum(t.numel() for t in adapt_sd.values())
+        if tsm is not None:
+            tsm_sd = state["tsm_module"]
+            tensor_count += len(tsm_sd)
+            param_count += sum(t.numel() for t in tsm_sd.values())
         if tensor_count == 0:
             raise RuntimeError(
                 "PM-Retrieval checkpoint has 0 tensors — nothing to save. "
@@ -217,6 +229,8 @@ def save_adapter_flat(trainer: Any, output_dir: str) -> None:
             )
 
         all_keys = list(pm_sd.keys()) + list(adapt_sd.keys())
+        if tsm is not None:
+            all_keys += list(state["tsm_module"].keys())
         logger.info("[PM-Retrieval] Saving %d tensors (%d params)", tensor_count, param_count)
         logger.info("[PM-Retrieval] First 20 keys: %s", all_keys[:20])
 
@@ -504,6 +518,20 @@ def resume_checkpoint(
                 missing, unexpected = pmr["adapter"].load_state_dict(adapt_sd, strict=False)
                 logger.info("[PM-Retrieval] Loaded Adapter: %d tensors, missing=%d, unexpected=%d",
                             len(adapt_sd), len(missing), len(unexpected))
+
+        # ---- TSM module (optional) -----------------------------------------
+        tsm_sd = saved.get("tsm_module", None)
+        if tsm_sd is not None:
+            tsm = getattr(module.model, 'tsm_module', None)
+            if tsm is not None:
+                missing, unexpected = tsm.load_state_dict(tsm_sd, strict=False)
+                logger.info("[TSM] Loaded TSM: %d tensors, missing=%d, unexpected=%d",
+                            len(tsm_sd), len(missing), len(unexpected))
+                if "tsm_mode" in saved:
+                    module.model._tsm_mode = saved["tsm_mode"]
+                    logger.info("[TSM] Restored tsm_mode=%s", saved["tsm_mode"])
+            else:
+                logger.warning("[TSM] Checkpoint contains TSM weights but model has no tsm_module")
 
         if state_path.exists():
             state = torch.load(str(state_path), map_location=module.device, weights_only=False)

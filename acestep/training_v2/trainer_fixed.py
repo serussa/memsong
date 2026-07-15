@@ -50,7 +50,7 @@ from acestep.training_v2.trainer_helpers import (
     save_final,
     verify_saved_adapter,
 )
-from acestep.training_v2.trainer_basic_loop import run_basic_training_loop, _log_phase_memory_gate, _log_section_rope_diag
+from acestep.training_v2.trainer_basic_loop import run_basic_training_loop, _log_transport_diag, _log_section_rope_diag
 
 logger = logging.getLogger(__name__)
 
@@ -294,22 +294,34 @@ class FixedLoRATrainer:
 
         # -- Training memory features ----------------------------------------
         if getattr(cfg, "gradient_checkpointing", True):
-            ckpt_ok, cache_off, grads_ok = configure_memory_features(
-                self.module.model.decoder
-            )
-            self.module.force_input_grads_for_checkpointing = ckpt_ok
-            if ckpt_ok:
+            # TSM uses hook-based hidden state injection, which is
+            # incompatible with gradient checkpointing.  When enabled,
+            # torch.utils.checkpoint wraps layer forward in torch.no_grad(),
+            # detaching the hook-injected output from the autograd graph.
+            if getattr(cfg, "use_tsm", False):
                 yield TrainingUpdate(
                     0, 0.0,
-                    f"[INFO] Gradient checkpointing enabled "
-                    f"(use_cache={not cache_off}, input_grads={grads_ok})",
-                    kind="info",
-                )
-            else:
-                yield TrainingUpdate(
-                    0, 0.0, "[WARN] Gradient checkpointing not supported by this model",
+                    "[INFO] Gradient checkpointing DISABLED (TSM requires hook-based "
+                    "gradient flow; checkpointing would detach TSM from autograd)",
                     kind="warn",
                 )
+            else:
+                ckpt_ok, cache_off, grads_ok = configure_memory_features(
+                    self.module.model.decoder
+                )
+                self.module.force_input_grads_for_checkpointing = ckpt_ok
+                if ckpt_ok:
+                    yield TrainingUpdate(
+                        0, 0.0,
+                        f"[INFO] Gradient checkpointing enabled "
+                        f"(use_cache={not cache_off}, input_grads={grads_ok})",
+                        kind="info",
+                    )
+                else:
+                    yield TrainingUpdate(
+                        0, 0.0, "[WARN] Gradient checkpointing not supported by this model",
+                        kind="warn",
+                    )
         else:
             yield TrainingUpdate(
                 0, 0.0,
@@ -403,7 +415,7 @@ class FixedLoRATrainer:
                     if global_step % cfg.log_heavy_every == 0:
                         tb.log_per_layer_grad_norms(self.module.model, global_step)
 
-                    _log_phase_memory_gate(self.module, tb, global_step)
+                    _log_transport_diag(self.module, tb, global_step)
                     _log_section_rope_diag(self.module, tb, global_step)
 
                     optimizer.zero_grad(set_to_none=True)
@@ -465,7 +477,7 @@ class FixedLoRATrainer:
                         steps_per_epoch=steps_per_epoch,
                     )
 
-                _log_phase_memory_gate(self.module, tb, global_step)
+                _log_transport_diag(self.module, tb, global_step)
                 _log_section_rope_diag(self.module, tb, global_step)
 
                 optimizer.zero_grad(set_to_none=True)

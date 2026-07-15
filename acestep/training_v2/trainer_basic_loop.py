@@ -93,7 +93,7 @@ def _flush_accumulated(
         tb.log_per_layer_grad_norms(module.model, global_step)
 
     # ---- PhaseMemory gate monitoring (no impact on training) ----
-    _log_phase_memory_gate(module, tb, global_step)
+    _log_transport_diag(module, tb, global_step)
     _log_section_rope_diag(module, tb, global_step)
 
     return global_step, avg_loss, updates
@@ -162,15 +162,25 @@ def run_basic_training_loop(
 
     # -- Training memory features (same as Fabric path) ----------------
     if getattr(cfg, "gradient_checkpointing", True):
-        ckpt_ok, cache_off, grads_ok = configure_memory_features(module.model.decoder)
-        module.force_input_grads_for_checkpointing = ckpt_ok
-        if ckpt_ok:
+        # TSM uses hook-based hidden state injection, which is
+        # incompatible with gradient checkpointing.
+        if getattr(cfg, "use_tsm", False):
             yield TrainingUpdate(
                 0, 0.0,
-                f"[INFO] Gradient checkpointing enabled "
-                f"(use_cache={not cache_off}, input_grads={grads_ok})",
-                kind="info",
+                "[INFO] Gradient checkpointing DISABLED (TSM requires hook-based "
+                "gradient flow; checkpointing would detach TSM from autograd)",
+                kind="warn",
             )
+        else:
+            ckpt_ok, cache_off, grads_ok = configure_memory_features(module.model.decoder)
+            module.force_input_grads_for_checkpointing = ckpt_ok
+            if ckpt_ok:
+                yield TrainingUpdate(
+                    0, 0.0,
+                    f"[INFO] Gradient checkpointing enabled "
+                    f"(use_cache={not cache_off}, input_grads={grads_ok})",
+                    kind="info",
+                )
 
     # -- Resume ---------------------------------------------------------
     start_epoch = 0
@@ -341,11 +351,11 @@ def run_basic_training_loop(
 # ---------------------------------------------------------------------------
 
 
-def _log_phase_memory_gate(module: Any, tb: Any, global_step: int) -> None:
-    """Log PhaseMemory diagnostics from ``module.pm_diag``.
+def _log_transport_diag(module: Any, tb: Any, global_step: int) -> None:
+    """Log transport/TSM diagnostics from ``module.pm_diag``.
 
-    Hits every 50 steps.  Logs PM internal state, K/V injection strength,
-    and attention conditioning metrics to TensorBoard.
+    Hits every 50 steps.  Logs Sinkhorn coupling, delta_h, TSM slot
+    statistics to TensorBoard.
     """
     log_every = 50
     if global_step % log_every != 0:
@@ -357,17 +367,17 @@ def _log_phase_memory_gate(module: Any, tb: Any, global_step: int) -> None:
 
     info_parts = []
     for key, value in diag.items():
-        label = f"pm/{key}"
+        label = f"transport/{key}"
         try:
             val = float(value)
-            info_parts.append(f"{key}={val:.4f}")
+            info_parts.append(f"{key}={val:.6e}")
             if tb is not None:
                 tb.log_scalar(label, val, global_step)
         except (TypeError, ValueError):
             continue
 
     if info_parts:
-        logger.info("[PM] %s", "  ".join(info_parts))
+        logger.info("[Transport-Diag] %s", "  ".join(info_parts))
 
 
 SECTION_NAMES = {0: "UNKNOWN", 1: "INTRO", 2: "VERSE", 3: "PRECHORUS", 4: "CHORUS", 5: "BRIDGE", 6: "OUTRO", 7: "INSTR"}

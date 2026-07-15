@@ -229,6 +229,20 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
         dataset_json=args.dataset_json,
         tensor_output=args.tensor_output,
         max_duration=args.max_duration,
+        # TSM
+        use_tsm=getattr(args, "use_tsm", False),
+        tsm_mode=getattr(args, "tsm_mode", "sinkhorn_tsm"),
+        tsm_layers_str=getattr(args, "tsm_layers", "12"),
+        tsm_memory_dim=getattr(args, "tsm_memory_dim", 256),
+        tsm_num_heads=getattr(args, "tsm_num_heads", 4),
+        tsm_ffn_dim=getattr(args, "tsm_ffn_dim", 512),
+        tsm_slot_layers=getattr(args, "tsm_slot_layers", 1),
+        tsm_dropout=getattr(args, "tsm_dropout", 0.0),
+        tsm_detach_coupling=getattr(args, "tsm_detach_coupling", True),
+        tsm_zero_init_output=getattr(args, "tsm_zero_init_output", True),
+        tsm_enable_slot_mixer=getattr(args, "tsm_enable_slot_mixer", True),
+        transport_ckpt=getattr(args, "transport_ckpt", None),
+        max_train_steps=getattr(args, "max_train_steps", None),
     )
 
     return adapter_cfg, train_cfg

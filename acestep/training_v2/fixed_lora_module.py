@@ -46,6 +46,12 @@ from acestep.training_v2.configs import (
 from acestep.training_v2.timestep_sampling import apply_cfg_dropout, sample_timesteps
 from acestep.training_v2.ui import TrainingUpdate
 
+# TSM module (optional)
+from acestep.modules.transported_structural_memory import (
+    TransportedStructuralMemory,
+    collect_tsm_grad_norms,
+)
+
 # Union type for adapter configs
 AdapterConfig = Union[LoRAConfigV2, LoKRConfigV2, PhaseMemoryConfigV2, PMDCConfigV2]
 
@@ -477,19 +483,15 @@ class FixedLoRAModule(nn.Module):
 
         D = model.config.hidden_size
 
-        # PhaseMemory (recurrent state provider, no residual injection)
-        pm_ret = PMRetrievalPhaseMemory(
-            dim=D,
-            mem_dim=128,
-            hidden_dim=256,
-            normalize_internal_state=True,
-        ).to(self.device).float()
+        # PM removed — scaffold-only Sinkhorn does not need PhaseMemory
+        pm_ret = None
 
         # ---- Transport vs standard retrieval ----------------------------------
         use_transport = getattr(cfg, 'use_transport_retrieval', False)
 
         if use_transport:
             # TransportRetrievalAdapter (v5: unit-level Sinkhorn transport)
+            # pm_dim=256 to match pretrained checkpoint (PM removed, pm_state=zeros)
             adapt = TransportRetrievalAdapter(
                 hidden_dim=D,
                 text_dim=D,
@@ -542,18 +544,17 @@ class FixedLoRAModule(nn.Module):
             ).to(self.device).float()
 
         # Store references on the model object (not self) to avoid nn.Module.__setattr__ interference
-        model._pmr = {"pm": pm_ret, "adapter": adapt}
+        model._pmr = {"pm": None, "adapter": adapt}  # PM removed
+        self._pmr = model._pmr  # alias for resume_checkpoint lookup
 
         # Snapshot initial params for delta tracking
         model._pmr_init_params = {}
-        for name, p in pm_ret.named_parameters():
-            model._pmr_init_params[f"pm.{name}"] = p.data.cpu().clone()
         for name, p in adapt.named_parameters():
             model._pmr_init_params[f"adapter.{name}"] = p.data.cpu().clone()
 
-        trainable_count = sum(p.numel() for p in pm_ret.parameters()) + \
-                          sum(p.numel() for p in adapt.parameters())
-        logger.info("[PM_Retrieval] PhaseMemory: %s params", f"{sum(p.numel() for p in pm_ret.parameters()):,}")
+        adapter_param_count = sum(p.numel() for p in adapt.parameters())
+        trainable_count = adapter_param_count
+        logger.info("[PM_Retrieval] PM removed — scaffold-only Sinkhorn (no PhaseMemory needed)")
 
         if use_transport:
             logger.info("[Transport] TransportRetrievalAdapter: %s params (d_r=%d sinkhorn_iters=%d)",
@@ -581,16 +582,84 @@ class FixedLoRAModule(nn.Module):
                 logger.info("[PM-R V4] PhaseScaffoldWarp coef_head[-1] zero-init check: weight_norm=%.10f bias_norm=%.10f",
                             last_w, last_b)
 
+        # ---- TSM creation (optional) ------------------------------------------
+        use_tsm = getattr(cfg, 'use_tsm', False)
+        tsm = None
+        tsm_mode = getattr(cfg, 'tsm_mode', 'sinkhorn_tsm')
+        if use_tsm:
+            tsm = TransportedStructuralMemory(
+                model_dim=D,
+                memory_dim=getattr(cfg, 'tsm_memory_dim', 256),
+                num_heads=getattr(cfg, 'tsm_num_heads', 4),
+                ffn_dim=getattr(cfg, 'tsm_ffn_dim', 512),
+                slot_layers=getattr(cfg, 'tsm_slot_layers', 1),
+                dropout=getattr(cfg, 'tsm_dropout', 0.0),
+                epsilon=getattr(cfg, 'tsm_epsilon', 1e-6),
+                detach_coupling=getattr(cfg, 'tsm_detach_coupling', True),
+            ).to(self.device).float()
+            # Store TSM metadata on model
+            model._tsm_mode = tsm_mode
+            tsm_param_count = sum(p.numel() for p in tsm.parameters())
+            logger.info("[TSM] Created TransportedStructuralMemory (mode=%s, dim=%d): %s params",
+                        tsm_mode, getattr(cfg, 'tsm_memory_dim', 256), f"{tsm_param_count:,}")
+
+        # ---- Load pretrained transport weights (optional) -----------------
+        transport_ckpt_path = getattr(cfg, 'transport_ckpt', None)
+        if transport_ckpt_path:
+            logger.info("[Transport] Loading pretrained weights from: %s", transport_ckpt_path)
+            ckpt = torch.load(transport_ckpt_path, map_location='cpu', weights_only=True)
+            # Load adapter weights (skip phase_memory — PM is removed)
+            if 'retrieval_adapter' in ckpt:
+                missing, unexpected = adapt.load_state_dict(ckpt['retrieval_adapter'], strict=False)
+                logger.info("[Transport] Adapter weights loaded: %s missing keys, %s unexpected keys",
+                            len(missing), len(unexpected) if unexpected else 0)
+                if missing:
+                    logger.warning("[Transport] Missing adapter keys: %s", missing[:5])
+            else:
+                logger.warning("[Transport] Checkpoint has no 'retrieval_adapter' key!")
+            del ckpt
+
         # Freeze backbone FIRST
         for param in model.parameters():
             param.requires_grad = False
 
         # THEN register modules onto model so their params appear in model.parameters()
-        model.add_module("pm_retrieval_pm", pm_ret)
+        # PM removed — not registered
         model.add_module("pm_retrieval_adapter", adapt)
+        if tsm is not None:
+            model.add_module("tsm_module", tsm)
 
-        frozen_fixed = sum(p.numel() for p in model.parameters())
+        # ---- Selective parameter freezing for TSM experiments ---------------
+        if use_tsm:
+            # For pool/broadcast mode, freeze slot mixer params
+            if tsm_mode == 'sinkhorn_pool_broadcast':
+                for layer in tsm.slot_layers:
+                    for param in layer.parameters():
+                        param.requires_grad = False
+                logger.info("[TSM] Pool/Broadcast mode: slot mixer params frozen")
+
+            # When loading pretrained transport weights, freeze adapter
+            # so only TSM params are trained (Pi/delta_h stay fixed)
+            if transport_ckpt_path:
+                for param in adapt.parameters():
+                    param.requires_grad = False
+                logger.info("[TSM] Adapter frozen (pretrained weights loaded from checkpoint); "
+                            "only TSM parameters are trainable")
+
+        # ---- Count trainable/frozen ----------------------------------------
+        frozen_fixed = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+        trainable_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total_count = frozen_fixed + trainable_count
+
+        # Log trainable parameter breakdown
+        if use_tsm:
+            tsm_trainable = sum(p.numel() for p in tsm.parameters() if p.requires_grad)
+            tsm_total = sum(p.numel() for p in tsm.parameters())
+            adapt_trainable = sum(p.numel() for p in adapt.parameters() if p.requires_grad)
+            backbone_trainable = trainable_count - tsm_trainable - adapt_trainable
+            logger.info("[TSM] Trainable breakdown: backbone=%s adapter=%s TSM=%s/%s",
+                        f"{backbone_trainable:,}",
+                        f"{adapt_trainable:,}", f"{tsm_trainable:,}", f"{tsm_total:,}")
 
         self.model = model
         self.pmdc_config = cfg
@@ -661,7 +730,12 @@ class FixedLoRAModule(nn.Module):
         H = hs_list[0].float() if hs_list else torch.zeros(bsz, T_h, self.model.config.hidden_size, device=device, dtype=torch.float32)
 
         # ---- Step 2: PMRetrievalPhaseMemory forward → pm_state ------------
-        # Returns [B, T_h, 256] — differentiable, no detach, no residual
+        # PM removed — scaffold-only Sinkhorn mode. Non-transport path is unsupported.
+        if self.model._pmr["pm"] is None:
+            raise RuntimeError(
+                "[PM-Retrieval] PM is removed. Non-transport pm_retrieval mode "
+                "is not supported. Use --use-transport-retrieval."
+            )
         pm_state = self.model._pmr["pm"](H, t)
 
         # ---- Step 3: Build/load scaffold from batch metadata -------------
@@ -956,8 +1030,8 @@ class FixedLoRAModule(nn.Module):
         T_h = hs_list[0].shape[1] if hs_list else xt.shape[1]
         H = hs_list[0].float() if hs_list else torch.zeros(bsz, T_h, self.model.config.hidden_size, device=device, dtype=torch.float32)
 
-        # ---- Step 2: PMRetrievalPhaseMemory forward → pm_state ------------
-        pm_state = self.model._pmr["pm"](H, t)
+        # ---- Step 2: PM removed — scaffold-only Sinkhorn (no PhaseMemory) ---
+        pm_state = torch.zeros(bsz, T_h, 256, device=device, dtype=torch.float32)
 
         # ---- Step 3: Build/load scaffold from batch metadata -------------
         adapt = self.model._pmr["adapter"]
@@ -1075,6 +1149,27 @@ class FixedLoRAModule(nn.Module):
 
         final_h = H + delta_h
 
+        # ---- Step 4.5: TSM forward (if enabled) ----------------------------
+        tsm = getattr(self.model, 'tsm_module', None)
+        tsm_mode = getattr(self.model, '_tsm_mode', 'sinkhorn_tsm')
+        tsm_diag: Dict[str, float] = {}
+        if tsm is not None and Pi is not None and Pi.shape[-1] > 0:
+            enable_mixer = (tsm_mode != 'sinkhorn_pool_broadcast')
+            # Build condition mask: all K units are lyric units (valid)
+            K_tsm = Pi.shape[-1]
+            condition_mask = torch.ones(B, K_tsm, dtype=torch.bool, device=device)
+            tsm_out, tsm_diag = tsm(
+                hidden_states=final_h,  # H + delta_h (transport residual)
+                coupling=Pi,
+                condition_mask=condition_mask,
+                detach_coupling=True,
+                enable_slot_mixer=enable_mixer,
+            )
+            final_h = final_h + tsm_out.to(dtype=final_h.dtype)
+            transport_diag.update(tsm_diag)
+        elif tsm is not None:
+            transport_diag["tsm_skipped"] = 1.0
+
         # Track residual stats
         with torch.no_grad():
             retrieval_residual_norm = delta_h.norm(dim=-1).mean().item()
@@ -1112,11 +1207,8 @@ class FixedLoRAModule(nn.Module):
         loss = flow_loss
 
         # ---- Step 7: Parameter tracking (step 0 clone, step 20 delta) ----
-        pm = self.model._pmr["pm"]
         if self._pmr_step == 0 and self._pmr_tracked is None:
             self._pmr_tracked = {
-                "pm_proj_r": pm.proj_r.weight.detach().clone().cpu(),
-                "pm_omega": pm.omega.weight.detach().clone().cpu(),
                 "q_mlp": adapt.q_mlp[0].weight.detach().clone().cpu(),
                 "k_mlp": adapt.k_mlp[0].weight.detach().clone().cpu(),
                 "v_mlp": adapt.v_mlp[0].weight.detach().clone().cpu(),
@@ -1125,20 +1217,31 @@ class FixedLoRAModule(nn.Module):
             }
             # Re-init pmr_init_params
             self.model._pmr_init_params = {}
-            for name, p in pm.named_parameters():
-                self.model._pmr_init_params[f"pm.{name}"] = p.data.cpu().clone()
             for name, p in adapt.named_parameters():
                 self.model._pmr_init_params[f"adapter.{name}"] = p.data.cpu().clone()
-            print("[Transport-TRACK] params snapshotted at step 0", flush=True)
+            # Also track TSM params
+            tsm = getattr(self.model, 'tsm_module', None)
+            if tsm is not None:
+                for name, p in tsm.named_parameters():
+                    self.model._pmr_init_params[f"tsm.{name}"] = p.data.cpu().clone()
+                self._pmr_tracked["tsm_out_proj_w"] = tsm.output_proj.weight.detach().clone().cpu()
+            print("[Transport-TRACK] params snapshotted at step 0 (no PM)", flush=True)
 
         if self._pmr_step == 20 and self._pmr_tracked is not None:
             t = self._pmr_tracked
             def delta(name, before):
-                after_map = {"pm_proj_r": pm.proj_r.weight, "pm_omega": pm.omega.weight,
-                             "q_mlp": adapt.q_mlp[0].weight, "k_mlp": adapt.k_mlp[0].weight,
-                             "v_mlp": adapt.v_mlp[0].weight, "out_proj": adapt.out_proj.weight}
+                after_map = {
+                    "q_mlp": adapt.q_mlp[0].weight, "k_mlp": adapt.k_mlp[0].weight,
+                    "v_mlp": adapt.v_mlp[0].weight, "out_proj": adapt.out_proj.weight,
+                }
                 if name == "write_logit" and hasattr(adapt, 'write_logit'):
                     after = adapt.write_logit
+                elif name == "tsm_out_proj_w":
+                    tsm = getattr(self.model, 'tsm_module', None)
+                    if tsm is not None:
+                        after = tsm.output_proj.weight
+                    else:
+                        return -1.0
                 else:
                     after = after_map.get(name)
                     if after is None:
@@ -1148,7 +1251,7 @@ class FixedLoRAModule(nn.Module):
             for k in t:
                 d = delta(k, t[k])
                 if d >= 0:
-                    print(f"  {k}_delta = {d:.12e}", flush=True)
+                    print(f"  {k}_delta = {d:.6e}", flush=True)
             print("[Transport-DELTA] ===================================================\n", flush=True)
 
         self._pmr_step += 1
@@ -1166,18 +1269,22 @@ class FixedLoRAModule(nn.Module):
             init_ps = getattr(self.model, '_pmr_init_params', None)
             if init_ps is not None:
                 delta_sum = 0.0; count = 0
-                for pm_name, p in self.model._pmr["pm"].named_parameters():
-                    key = f"pm.{pm_name}"
-                    if key in init_ps:
-                        diff = (p.data.cpu() - init_ps[key]).norm().item()
-                        init_n = init_ps[key].norm().item()
-                        delta_sum += diff / max(init_n, 1e-8); count += 1
+                # PM removed — only track adapter params
                 for ad_name, p in adapt.named_parameters():
                     key = f"adapter.{ad_name}"
                     if key in init_ps:
                         diff = (p.data.cpu() - init_ps[key]).norm().item()
                         init_n = init_ps[key].norm().item()
                         delta_sum += diff / max(init_n, 1e-8); count += 1
+                # TSM params
+                tsm_mod = getattr(self.model, 'tsm_module', None)
+                if tsm_mod is not None:
+                    for tsm_name, p in tsm_mod.named_parameters():
+                        key = f"tsm.{tsm_name}"
+                        if key in init_ps:
+                            diff = (p.data.cpu() - init_ps[key]).norm().item()
+                            init_n = init_ps[key].norm().item()
+                            delta_sum += diff / max(init_n, 1e-8); count += 1
                 diag["param_delta_mean"] = delta_sum / max(count, 1)
 
             has_pi = diag.get("transport_max", 0) > 0
@@ -1190,22 +1297,48 @@ class FixedLoRAModule(nn.Module):
                 f"w|r={diag.get('write_ratio', -1):.2e} "
                 f"qkσ={diag.get('qk_std', 0):.4f} "
                 + (f"skipped" if not has_pi else
-                   f"δp={diag.get('param_delta_mean', 0):.2e} "
-                   f"Δh={diag.get('hidden_delta_norm', 0):.2e}"),
+                   f"δp={diag.get('param_delta_mean', 0):.6e} "
+                   f"Δh={diag.get('hidden_delta_norm', 0):.6e}"),
                 flush=True,
             )
+            # TSM slot collapse diagnostics
+            cc = diag.get('coupling_column_cosine_mean', -1)
+            rc = diag.get('tsm_raw_slot_cosine_mean', -1)
+            crc = diag.get('tsm_centered_slot_cosine_mean', -1)
+            mc = diag.get('tsm_centered_mixed_cosine_mean', -1)
+            rms_r = diag.get('tsm_centered_to_raw_rms_ratio', -1)
+            eff_rk = diag.get('tsm_centered_slot_effective_rank', -1)
+            if cc >= 0:
+                print(
+                    f"  [TSM-COS] col={cc:.3f} raw={rc:.3f} cntr={crc:.3f} mx={mc:.3f} r∅r={rms_r:.3f} eff_rk={eff_rk:.1f}",
+                    flush=True,
+                )
 
             # Store grad-capture modules so the training loop reads grads
             # after loss.backward() completes (NOT via register_hook, which
             # fires before parameter grads are populated).
             if not hasattr(self, '_pmr_grad_mods'):
                 self._pmr_grad_mods = [
-                    ("PM", self.model._pmr["pm"]),
+                    # PM removed
                     ("q_mlp", adapt.q_mlp),
                     ("k_mlp", adapt.k_mlp),
                     ("v_mlp", adapt.v_mlp),
                     ("out_proj", adapt.out_proj),
                 ]
+                # Add TSM grad modules if present
+                tsm_mod = getattr(self.model, 'tsm_module', None)
+                if tsm_mod is not None:
+                    self._pmr_grad_mods.extend([
+                        ("tsm_output_proj", tsm_mod.output_proj),
+                        ("tsm_value_proj", tsm_mod.value_proj),
+                        ("tsm_input_norm", tsm_mod.input_norm),
+                    ])
+                    # Add slot mixer grads if slot layers exist
+                    for i, layer in enumerate(tsm_mod.slot_layers):
+                        self._pmr_grad_mods.extend([
+                            (f"tsm_slot{i}_attn", layer.q_proj),
+                            (f"tsm_slot{i}_ffn", layer.ffn),
+                        ])
 
             self.pm_diag = diag
 

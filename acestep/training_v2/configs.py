@@ -365,6 +365,46 @@ class TrainingConfigV2(TrainingConfig):
     max_duration: float = 240.0
     """Maximum audio duration in seconds (preprocessing)."""
 
+    # --- TSM (Transported Structural Memory) -----------------------------------
+    use_tsm: bool = False
+    """Enable Transported Structural Memory module."""
+
+    tsm_mode: str = "sinkhorn_tsm"
+    """TSM mode: 'sinkhorn_only', 'sinkhorn_pool_broadcast', 'sinkhorn_tsm', 'softmax_tsm'."""
+
+    tsm_layers_str: str = "12"
+    """Comma-separated layer indices for TSM injection."""
+
+    tsm_memory_dim: int = 256
+    """Dimension of the TSM structural slot memory."""
+
+    tsm_num_heads: int = 4
+    """Number of attention heads in TSM slot mixer."""
+
+    tsm_ffn_dim: int = 512
+    """Hidden dimension of TSM slot mixer FFN."""
+
+    tsm_slot_layers: int = 1
+    """Number of TSM slot transformer layers."""
+
+    tsm_dropout: float = 0.0
+    """Dropout rate in TSM slot mixer."""
+
+    tsm_detach_coupling: bool = True
+    """If True, detach coupling before TSM forward (freeze Sinkhorn branch)."""
+
+    tsm_zero_init_output: bool = True
+    """If True, zero-initialise output_proj so H' == H at init."""
+
+    tsm_enable_slot_mixer: bool = True
+    """Enable slot mixer (MHSA + FFN) in TSM. False = pool/broadcast only."""
+
+    tsm_epsilon: float = 1e-6
+    """Small constant for numerical stability in mass normalisation."""
+
+    transport_ckpt: Optional[str] = None
+    """Path to pretrained transport checkpoint (PM + adapter weights)."""
+
     # --- Step limit (for smoke tests) ----------------------------------------
     max_train_steps: Optional[int] = None
     """If set, stop training after this many global steps.  Useful for smoke tests."""
@@ -460,6 +500,20 @@ class TrainingConfigV2(TrainingConfig):
                 "scoring_mode": self.scoring_mode,
                 "use_pm_gate": self.use_pm_gate,
                 "gate_hidden_dim": self.gate_hidden_dim,
+                # TSM params
+                "use_tsm": self.use_tsm,
+                "tsm_mode": self.tsm_mode,
+                "tsm_layers_str": self.tsm_layers_str,
+                "tsm_memory_dim": self.tsm_memory_dim,
+                "tsm_num_heads": self.tsm_num_heads,
+                "tsm_ffn_dim": self.tsm_ffn_dim,
+                "tsm_slot_layers": self.tsm_slot_layers,
+                "tsm_dropout": self.tsm_dropout,
+                "tsm_detach_coupling": self.tsm_detach_coupling,
+                "tsm_zero_init_output": self.tsm_zero_init_output,
+                "tsm_enable_slot_mixer": self.tsm_enable_slot_mixer,
+                "tsm_epsilon": self.tsm_epsilon,
+                "transport_ckpt": self.transport_ckpt,
             }
         )
         return base
