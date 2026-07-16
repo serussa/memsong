@@ -220,9 +220,60 @@ bash scripts/run_per_long.sh \
 
 ---
 
-## 7. 常见问题
+## 7. 常见错误（已修复 & 需注意）
 
-**Q: 显存不够？**
+### 7.1 生成时长错误：只能唱 35 秒
+
+**现象**：ASR 只转录出前 77 个汉字就 EOS，PER ~0.79。
+
+**根因**：`get_duration()` 用音素计数 `total_phonemes / 25` 算时长。音素来自 test.jsonl 中的 `[phoneme: ...]` 标签，但音素数量（883 个）远少于歌词字符数（400 字），因为音素标签只在每个 Section 前几句出现，不是完整歌词的完整音素序列。结果本应 180 秒的歌曲只生成了 35 秒。
+
+**修复后**：改为基于歌词字符数计算：
+- 中文：`len(chars) × 0.45`
+- 英文：`len(words) × 0.45`
+
+见 `tools/run_tsm_eval.py::get_duration()`。
+
+### 7.2 歌词噪音标签泄漏
+
+**现象**：发送给模型的歌词包含 `[desc:The track opens...]` `[lyrics:...]` `[phoneme:...]` 等内部标签。
+
+**根因**：`parse_entry()` 的正则 `re.match(r'\[([^\]]+)\]', c)` 匹配到 `[desc:The track opens...]` 等内标签，name 是完整字符串 `desc:The track opens...`，导致 `if name in seen` 去重失效。
+
+**修复后**：只提取最外层的 `[SectionName]` 标签（Verse、Chorus 等），用 `c.split("[lyrics:")[1].split("]")[0]` 从标签后的内容中提取纯歌词。
+
+### 7.3 英文文件命名偏移
+
+**现象**：test.jsonl 中英文条目索引为 50~99，GT 的 file_index 为 0~49。如果直接用 fidx (0,10,20,30,40) 命名音频，PER 计算时无法匹配到 GT 歌词。
+
+**修复后**：英文音频使用 test.jsonl 的 entry index（50~99）作为文件名，`calc_per_long.py` 传入 `--offset 50` 匹配 GT。
+
+### 7.4 SongEval / AudioBox 找不到 FLAC 文件
+
+**现象**：count=0，评分全为 0。
+
+**根因**：两个评估脚本的 glob 只搜 `*.wav` 和 `*.mp3`，不搜 `*.flac`。ACE-Step 默认输出 flac。
+
+**修复后**：在 glob 模式中加入 `*.flac`。
+
+### 7.5 Qwen3-ASR 对歌唱的有效性
+
+**注意**：Qwen3-ASR-1.7B 官方支持 Speech／Singing Voice／Songs with BGM，完全可以用于歌唱转写。先前误判为"不支持唱歌"——实际问题是时长只有 35 秒而非 180 秒，ASR 正确转录了前 35 秒的内容后自然 EOS。
+
+PER 修正前后的实际变化：
+| 指标 | 错误状态（35s） | 修复后（全长） |
+|------|:---:|:---:|
+| ASR 转录长度 | 77 字 | 386 字 |
+| PER (baseline_zh) | 0.789 | **0.178** |
+| 覆盖率 | ~20% | ~88% |
+
+### 7.6 gen_one.py 参数匹配
+
+生成时需确保 `gen_one.py` 中 TransportRetrievalAdapter 的 `transport_qk_scale` 和 `scoring_mode` 与训练一致。如果 checkpoint 中缺少某个 key，用 `strict=False` 加载。
+
+---
+
+## 8. 常见问题
 - Audiobox-Aesthetics: ~4 GB
 - SongEval: ~4 GB
 - Qwen3-ASR 转录: ~5 GB

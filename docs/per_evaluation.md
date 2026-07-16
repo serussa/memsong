@@ -46,19 +46,47 @@ PER = (S + D + I) / N，其中 S=替换错误数，D=删除错误数，I=插入�
 
 音频文件需按索引命名（与 GT 的 `file_index` 对齐）：
 
-- 中文音频：`000000.wav` ~ `000049.wav`（对应 GT file_index 0~49）
-- 英文音频：`000000.wav` ~ `000049.wav`（对应 GT file_index 0~49）
+- 中文音频：`000000.flac` ~ `000049.flac`（对应 GT file_index 0~49）
+- 英文音频：`000050.flac` ~ `000099.flac`（对应 GT file_index 0~49，使用 `--offset 50`）
+
+注意：英文音频使用 test.jsonl 中的 entry index（50~99）作为文件名，而非 0~49。
+`calc_per_long.py` 通过 `--offset 50` 将 GT 的 `file_index 0` 匹配到音频 `000050.flac`。
 
 ### 一键评估
 
 ```bash
-bash scripts/run_per.sh <input_dir> <language:cn/en> [output_dir]
+# 中文
+bash scripts/run_per.sh /path/to/audio_cn cn /path/to/results
+
+# 英文（带 offset）
+bash scripts/run_per_long.sh \
+    /path/to/transcription_en.jsonl \
+    Muse/eval_pipeline/gt_lyrics/en.jsonl \
+    /path/to/output \
+    my_model \
+    --offset 50
 ```
 
-示例：
+### 批量评估（推荐）
+
+使用 `tools/run_tsm_eval.py` 一键完成生成 + 评估：
+
 ```bash
-bash scripts/run_per.sh /path/to/audio_cn cn /path/to/results
+# 批量生成（3 方法 × 2 语言 × 5 首）
+python tools/run_tsm_eval.py generate
+
+# 评估（SongEval + AudioBox + ASR + PER）
+python tools/run_tsm_eval.py evaluate
+
+# 全部
+python tools/run_tsm_eval.py all
 ```
+
+脚本自动处理：
+- 英文文件命名（entry index 50~99）
+- PER offset 参数
+- 检查点选择（baseline / transport_only / sinkhorn_tsm）
+
 ### 脚本路径说明
 
 PER 评估复用 `Muse/eval_pipeline/` 下的流水线：
@@ -70,6 +98,7 @@ PER 评估复用 `Muse/eval_pipeline/` 下的流水线：
 | 音素工具 | `Muse/eval_pipeline/phoneme_utils.py` | 中英文音素转换 |
 | GT 歌词 | `Muse/eval_pipeline/gt_lyrics/` | 中文/英文 GT 歌词 |
 | 入口脚本 | `scripts/run_per.sh` | 一键运行 |
+| 批量入口 | `tools/run_tsm_eval.py` | 批量生成+评估 |
 
 ## 输出格式
 
