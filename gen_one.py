@@ -26,6 +26,14 @@ if isinstance(_input, dict):
     STEP_GATED_END = _input.get('step_gated_end', 0.65)
     REALLOCATION_LAM_MIN = _input.get('reallocation_lam_min', None)
     TSM_GAIN = _input.get('tsm_gain', 1.0)
+    TASK_TYPE = _input.get('task_type', 'text2music')
+    USE_LM = _input.get('use_lm', True)
+    LM_DIAGNOSE = _input.get('lm_diagnose', False)
+    SRC_AUDIO = _input.get('src_audio', None)
+    REPAINTING_START = _input.get('repainting_start', 0.0)
+    REPAINTING_END = _input.get('repainting_end', -1)
+    REPAINT_MODE = _input.get('repaint_mode', 'balanced')
+    REPAINT_STRENGTH = _input.get('repaint_strength', 0.5)
 else:
     # Legacy tuple
     METHOD, CKPT, CAPTION, LYRICS, OUT_DIR, SEED, DURATION = _input[:7]
@@ -36,6 +44,10 @@ else:
     STEP_GATED_END = _input[11] if len(_input) > 11 else 0.65
     REALLOCATION_LAM_MIN = _input[12] if len(_input) > 12 else None
     TSM_GAIN = _input[13] if len(_input) > 13 else 1.0
+    TASK_TYPE = _input[14] if len(_input) > 14 else 'text2music'
+    SRC_AUDIO = _input[15] if len(_input) > 15 else None
+    REPAINTING_START = _input[16] if len(_input) > 16 else 0.0
+    REPAINTING_END = _input[17] if len(_input) > 17 else -1
 
 dt = AceStepHandler()
 dt.initialize_service(project_root='/root/autodl-tmp/Ace-Step1.5', config_path='acestep-v15-sft',
@@ -46,7 +58,7 @@ for l in model.decoder.layers:
     if getattr(l, 'use_section_rope', False): l.use_section_rope = False
     if getattr(l, 'use_phase_memory', False): l.use_phase_memory = False
 llm = LLMHandler()
-llm.initialize(checkpoint_dir='/root/autodl-tmp/Ace-Step1.5', lm_model_path='acestep-5Hz-lm-1.7B', backend='pt', device='cuda')
+llm.initialize(checkpoint_dir='/root/autodl-tmp/Ace-Step1.5/checkpoints', lm_model_path='acestep-5Hz-lm-1.7B', backend='pt', device='cuda')
 
 # --- Shared scaffolding setup for both TSM and reallocation ---
 needs_scaffold = (METHOD != 'baseline') or (REALLOCATION_LAMBDA is not None and REALLOCATION_LAMBDA > 0)
@@ -54,8 +66,6 @@ needs_scaffold = (METHOD != 'baseline') or (REALLOCATION_LAMBDA is not None and 
 if needs_scaffold:
     from acestep.phase_memory import parse_lyrics_to_units, build_duration_scaffold
     from acestep.tgca.lyrics_parser import LyricsStructureParser
-    T_eff = int(DURATION * 25)
-
     # Setup structure holder (populated in patched prepare_condition)
     scaffold_holder = {}
     hook_holder = [None] if METHOD != 'baseline' else [None]
@@ -117,10 +127,11 @@ if needs_scaffold:
                 else:
                     pm = None
                 adapt.eval(); tsm.eval()
-                pa = torch.linspace(0, 1, T_eff, device=device).unsqueeze(0)
 
                 def hook(_m, _i, o):
-                    Ho = o[0]; Bt, T = Ho.shape[0], Ho.shape[1]; pp = pa[:, :T]
+                    Ho = o[0]; Bt, T = Ho.shape[0], Ho.shape[1]
+                    # Build position encoding from actual latent frames T (not heuristic duration)
+                    pp = torch.linspace(0, 1, T, device=Ho.device, dtype=torch.float32).unsqueeze(0)
                     if Bt > pp.shape[0]: pp = pp.expand(Bt, -1).contiguous()
                     s = scaffold_holder
                     uth_b = s['uth'].expand(Bt, -1, -1) if Bt > s['B'] else s['uth']
@@ -176,11 +187,54 @@ if needs_scaffold:
 
 has_cjk = any('一' <= c <= '鿿' or '㐀' <= c <= '䶿' for c in LYRICS)
 vocal_lang = 'zh' if has_cjk else 'en'
-params = GenerationParams(task_type='text2music', caption=CAPTION, lyrics=LYRICS,
+params_kw = dict(
+    task_type=TASK_TYPE, caption=CAPTION, lyrics=LYRICS,
     instrumental=False, bpm=120, keyscale='C major', timesignature='4',
     vocal_language=vocal_lang, duration=DURATION, inference_steps=50, guidance_scale=7.0,
-    seed=SEED, thinking=True, use_cot_metas=True, use_cot_caption=True, lm_temperature=0.75)
+    seed=SEED,
+    thinking=USE_LM, use_cot_metas=USE_LM, use_cot_caption=USE_LM, lm_temperature=0.75)
+if TASK_TYPE in ('repaint', 'cover', 'extract'):
+    params_kw['thinking'] = False
+    params_kw['use_cot_metas'] = False
+    params_kw['use_cot_caption'] = False
+    params_kw['repainting_start'] = REPAINTING_START
+    params_kw['repainting_end'] = REPAINTING_END
+    params_kw['repaint_mode'] = REPAINT_MODE
+    params_kw['repaint_strength'] = REPAINT_STRENGTH
+    params_kw['src_audio'] = SRC_AUDIO
+params = GenerationParams(**params_kw)
 config = GenerationConfig(batch_size=1, audio_format='flac', use_random_seed=False, seeds=[SEED])
+
+# ---- LM Diagnostic: check if audio_codes contain recoverable lyrics ----
+_lm_diag_codes = None
+if LM_DIAGNOSE and USE_LM:
+    print("[lm_diag] Getting audio codes from LLM...", flush=True)
+    _lm_res = llm.generate_with_stop_condition(
+        caption=CAPTION, lyrics=LYRICS,
+        infer_type="llm_dit",
+        temperature=0.75, cfg_scale=2.0,
+        target_duration=float(DURATION),
+        use_cot_metas=True, use_cot_caption=True, use_cot_language=True,
+        use_constrained_decoding=True,
+        batch_size=1, seeds=[SEED],
+    )
+    _raw = _lm_res.get("audio_codes", "")
+    if isinstance(_raw, list) and len(_raw) > 0:
+        _lm_diag_codes = _raw[0]
+    elif isinstance(_raw, str) and _raw.strip():
+        _lm_diag_codes = _raw
+
+    if _lm_diag_codes:
+        n_codes = len(_lm_diag_codes.split("<|audio_code_")) - 1
+        print(f"[lm_diag] Got {n_codes} audio codes. Re-inserting, skipping internal LM.", flush=True)
+        params_kw["audio_codes"] = _lm_diag_codes
+        params_kw["thinking"] = False
+        params_kw["use_cot_metas"] = False
+        params_kw["use_cot_caption"] = False
+        params = GenerationParams(**params_kw)
+    else:
+        print("[lm_diag] WARNING: no audio codes from LLM", flush=True)
+
 result = generate_music(dit_handler=dt, llm_handler=llm, params=params, config=config, save_dir=OUT_DIR)
 
 # Print diagnostics if reallocation was applied
@@ -192,3 +246,45 @@ if _rd is not None:
     restore_eager_attention()
 
 print('OK:' + (result.audios[0]['path'] if result.audios else 'no_audio'))
+
+# ---- LM Diagnostic: reverse transcription ----
+if LM_DIAGNOSE and _lm_diag_codes:
+    import difflib
+    _rev_prompt = (
+        "Below is the audio semantic code sequence of a song. "
+        "Read these codes and output the exact lyrics being sung.\n\n"
+        "Audio codes:\n" + _lm_diag_codes + "\n\nLyrics:"
+    )
+    _chat = [{"role": "system", "content": "You transcribe lyrics from audio codes."},
+             {"role": "user", "content": _rev_prompt}]
+    _rev_input = llm.llm_tokenizer.apply_chat_template(
+        _chat, tokenize=False, add_generation_prompt=True)
+    try:
+        _rev_ids = llm.llm_tokenizer(_rev_input, return_tensors="pt").to(llm.device)
+        _rev_out = llm.llm.generate(
+            **_rev_ids, max_new_tokens=512, temperature=0.1, do_sample=False,
+            pad_token_id=llm.llm_tokenizer.eos_token_id)
+        _rev_text = llm.llm_tokenizer.decode(
+            _rev_out[0][_rev_ids['input_ids'].shape[1]:], skip_special_tokens=True).strip()
+    except Exception as e:
+        _rev_text = ""
+        print(f"[lm_diag] Reverse transcription failed: {e}", flush=True)
+
+    import re as _re2
+    _clean_lyrics = _re2.sub(r'\[[^\]]+\]\n*', '', LYRICS).strip()
+    if _rev_text:
+        _matcher = difflib.SequenceMatcher(None, _clean_lyrics, _rev_text)
+        _S = _I = _D = 0
+        for _tag, _i1, _i2, _j1, _j2 in _matcher.get_opcodes():
+            if _tag == 'replace': _S += max(_i2 - _i1, _j2 - _j1)
+            elif _tag == 'delete': _D += (_i2 - _i1)
+            elif _tag == 'insert': _I += (_j2 - _j1)
+        _N = len(_clean_lyrics)
+        _cer = (_S + _D + _I) / max(_N, 1)
+        print(f"\n[lm_diag] {'='*50}", flush=True)
+        print(f"[lm_diag] Codes--text CER: {_cer:.4f}  (S={_S} D={_D} I={_I} N={_N})", flush=True)
+        print(f"[lm_diag] Recovered: {_rev_text[:200]}", flush=True)
+        print(f"[lm_diag] Original:  {_clean_lyrics[:200]}", flush=True)
+        print(f"[lm_diag] {'='*50}", flush=True)
+    else:
+        print(f"[lm_diag] No reverse transcription output", flush=True)

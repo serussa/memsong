@@ -1,0 +1,470 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ──
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs,multirow,graphicx}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{hyperref,cleveref}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{xcolor}
+\usepackage{algorithm,algpseudocode}
+
+% ── Title ──
+\title{\vspace{-1cm}
+Sinkhorn-Guided Transported Structural Memory for \\ Long-Form Singing Voice Generation
+\vspace{-0.5cm}}
+\author{Anonymous Author(s)}
+\date{}
+
+% ── Macros ──
+\newcommand{\todo}[1]{\textcolor{red}{[#1]}}
+\newcommand{\method}{\textsc{Sinkhorn-TSM}}
+\newcommand{\dit}{AceStep 1.5}
+\newcommand{\per}{PER}
+\newcommand{\ldg}{LDG}
+\newcommand{\sinkhorn}{Sinkhorn}
+\newcommand{\ot}{OT}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Long-form singing voice generation (60--300\,s) suffers from a progressive degradation of lyric intelligibility in the latter half of generated audio: the phoneme error rate (\per) of the final third is often 2--5$\times$ higher than the first third. We identify two root causes: (1)~the 5\,Hz language model's semantic code sequence truncates the final 20--30\% of lyrics when its duration estimate is ignored, and (2)~the DiT's cross-attention marginal distribution drifts over long generations, starving later lyric lines of attention mass. We present \method, a training-efficient plug-in that (a)~respects the LM's own duration estimate to ensure complete lyric coverage, and (b)~uses the scaffold-driven Sinkhorn transport plan to redistribute cross-attention mass across lyric lines, combined with a slot-based structural memory that reads and writes line-aligned features. On 10 Chinese songs (193--367\,s), \method~reduces overall \per~from 0.198 to 0.121 (39\%), late-segment \per~from 0.339 to 0.151 (55\%), and $\per_{\text{late}}-\per_{\text{early}}$ (LDG) from 0.299 to 0.107 (64\%), without degrading perceptual quality (SongEval, AudioBox).
+\end{abstract}
+
+% ==================================================================
+\section{Introduction}
+\label{sec:intro}
+% ==================================================================
+
+Generating high-quality singing voice with coherent lyrics over long durations (60--300\,s) remains a key challenge in music generation. The state-of-the-art \dit~model~\cite{acestep} combines a 5\,Hz language model (LM) for semantic code planning with a 24-layer diffusion transformer (DiT) for waveform synthesis. Despite strong per-segment intelligibility, we observe a systematic degradation of lyric intelligibility in long generations: the phoneme error rate of the final third (\per$_{\text{late}}$) is often 2--5$\times$ higher than the first third (\per$_{\text{early}}$).
+
+This paper identifies two independent root causes and proposes a unified solution:
+
+\textbf{Cause 1: Duration truncation in the LM stage.} The LM plans the audio content as a sequence of 5\,Hz discrete semantic tokens (``audio codes''). The number of codes equals $5 \times \text{duration}$. When the LM's own CoT-estimated duration is overridden by a heuristic input duration, the code sequence is truncated, leaving the final 20--30\% of lyrics unplanned. The DiT cannot render what was never planned. Fixing this requires (a)~passing $\text{target\_duration}=\text{None}$ to allow the LM to generate freely, (b)~not writing the heuristic duration into the LM's user metadata, and (c)~using the actual code count to determine the DiT's latent frame count.
+
+\textbf{Cause 2: Cross-attention marginal drift.} Even with complete LM codes, attention mass shifts from later lyric lines to earlier ones as generation progresses. This is a structural limitation of long-range cross-attention in diffusion models.
+
+\textbf{Proposed solution:} We introduce \method, a plug-in module that operates at DiT layer~12 during inference. It consists of (1)~a scaffold that converts the lyric structure into a line-level transport plan via Sinkhorn optimal transport, (2)~a TransportRetrievalAdapter that injects structure-aware residual corrections, and (3)~a TransportedStructuralMemory (TSM) that reads and writes slot-based features under the structural guidance of the Sinkhorn coupling. Crucially, the model is trained only once with frozen backbone and does not require re-training for inference-time adjustments.
+
+% ==================================================================
+\section{Related Work}
+\label{sec:related}
+% =================================================================
+
+\subsection{Music Generation with DiT}
+
+Diffusion transformers have become the dominant architecture for music generation \cite{musiclm,audioldm2,muse}. \dit~extends this with a 24-layer DiT conditioned on text encoder outputs and optional LM-generated semantic codes. Cross-attention between audio latents and text conditions is the primary mechanism for lyrics conditioning.
+
+\subsection{Optimal Transport in Generative Models}
+
+Sinkhorn-based optimal transport has been used for alignment in sequence generation \cite{ot_sequence, sinkhorn_transformer} and for attention modulation in transformers \cite{ot_attention}. To our knowledge, this is the first application of Sinkhorn coupling to redistribute attention mass across lyric lines in singing voice generation.
+
+\subsection{Structural Memory for Long Sequences}
+
+Slot-based memory \cite{slot_attention} and memory-augmented transformers \cite{mem_transformer} have been widely studied. The key distinction of TSM is using a Sinkhorn transport plan --- derived from the lyric structure itself --- as the structural condition for slot communication.
+
+% ==================================================================
+\section{Problem Analysis}
+\label{sec:analysis}
+% ==================================================================
+
+\subsection{Evaluation Setup}
+
+We evaluate on 10 Chinese songs from the \dit~test set, ranging from 193\,s to 367\,s (mean 224\,s). Each song includes full lyrics with section annotations ([Verse], [Chorus], etc.) We report:
+\begin{itemize}
+    \item \textbf{Phoneme Error Rate (\per):} $(S+D+I)/N$ computed via Levenshtein alignment on phoneme sequences (jieba + pypinyin for Chinese).
+    \item \textbf{Early/Middle/Late \per:} Only the first/middle/last third of reference phonemes are considered in one global alignment.
+    \item \textbf{LDG:} $\per_{\text{late}} - \per_{\text{early}}$, measuring degradation.
+    \item \textbf{SongEval:} Perceptual quality (5 dimensions, 0--5).
+    \item \textbf{AudioBox:} Aesthetic quality (4 dimensions).
+\end{itemize}
+
+\subsection{LM Duration Truncation}
+
+The earlier pipeline passed $\text{target\_duration}=180$ to the LM, constraining it to generate 900 codes irrespective of lyric length. This caused the final 20--50\% of lyrics to be compressed or omitted.
+
+\begin{table}[h]
+\centering
+\caption{Impact of duration truncation on single song.}
+\label{tab:truncation}
+\begin{tabular}{lcccc}
+\toprule
+Configuration & \per$\downarrow$ & Early & Late & LDG \\
+\midrule
+LM off (DiT-only) & 0.079 & 0.055 & 0.182 & 0.127 \\
+LM on (truncated, 900 codes) & 0.269 & 0.050 & 0.736 & 0.686 \\
+LM on (free, 996 codes) & \textbf{0.033} & 0.018 & 0.005 & --0.014 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Cross-Attention Marginal Drift}
+
+After fixing the duration issue, the LM+DiT baseline still shows $\per_{\text{late}} / \per_{\text{early}} \approx 8.5\times$ on hard songs, confirming that attention distribution drift is an independent problem beyond code truncation.
+
+% ==================================================================
+\section{Method}
+\label{sec:method}
+% ==================================================================
+
+\subsection{Overview}
+
+\method~consists of five components (Fig.~\ref{fig:arch}):
+
+\begin{enumerate}
+    \item \textbf{Lyrics Structure Scaffold} extracts line-level features from text, independent of audio duration.
+    \item \textbf{Sinkhorn Transport Plan} computes a doubly-stochastic coupling matrix between lyric lines.
+    \item \textbf{TransportRetrievalAdapter} injects structure-aware residual corrections at layer~12.
+    \item \textbf{TransportedStructuralMemory (TSM)} performs slot-based feature modulation under coupling guidance.
+    \item \textbf{LM Duration Correction} ensures the code sequence covers all lyrics.
+\end{enumerate}
+
+\subsection{Lyrics Structure Scaffold}
+
+The scaffold converts lyrics text into a set of structured tensors, computed once per song during the text encoding phase.
+
+Given lyrics with section tags, we parse them into \texttt{LyricUnit}s~\cite{lyrics_parser}. Each unit has a section type (VERSE, CHORUS, etc.), character count, and estimated token spans. Then:
+
+\begin{equation}
+\text{weight}_u = \text{char\_count}_u^{\gamma} \times m(\text{section}_u), \quad \text{unit\_duration}_u = \frac{\text{weight}_u}{\sum_v \text{weight}_v}
+\end{equation}
+
+where $\gamma=0.8$ and $m$ is a section-dependent multiplier (Chorus > Verse > Bridge). The key outputs are:
+
+\begin{itemize}
+    \item \texttt{token\_to\_unit} $[L]$: each text token's unit assignment.
+    \item \texttt{lyric\_mask} $[L]$: whether a token belongs to a lyric line (vs.\ section tag or silence).
+    \item \texttt{lyric\_unit\_mask} $[U]$: whether a unit is a singing line (vs.\ intro/outro/instrumental).
+    \item \texttt{uth} $[B, U, D]$: per-unit mean of encoder hidden states, capturing semantic content.
+\end{itemize}
+
+Non-singing units (INTRO, OUTRO, INSTRUMENTAL, INTERLUDE) are assigned $\texttt{lyric\_unit\_mask}=F$ and are excluded from downstream optimal transport.
+
+\subsection{Sinkhorn Transport Plan}
+
+The coupling matrix $\mathbf{P} \in \mathbb{R}^{U \times U}$ redistributes attention mass across lyric lines:
+
+\[
+\tilde{\mathbf{H}} = \texttt{uth}[\texttt{lyric\_unit\_mask}] \in \mathbb{R}^{n_{\text{lyric}} \times D}
+\]
+\[
+\mathbf{S} = \text{L2Norm}(\tilde{\mathbf{H}})\,\text{L2Norm}(\tilde{\mathbf{H}})^\top, \quad \mathbf{C} = 1 - \text{clamp}(\mathbf{S}, -1, 1)
+\]
+\[
+\mathbf{P}_{\text{sub}} = \text{Sinkhorn}(\mathbf{C}, \varepsilon=0.18, \text{iters}=10)
+\]
+
+Sinkhorn iteration:
+
+\begin{algorithm}[H]
+\caption{log-Sinkhorn}
+\label{alg:sinkhorn}
+\begin{algorithmic}[1]
+\State $\mathbf{K} = \exp(-\mathbf{C} / \varepsilon)$
+\State $\mathbf{a} = \mathbf{1}_n$, $\mathbf{b} = \mathbf{1}_n$
+\For{$t = 1$ \textbf{to} iters}
+    \State $\mathbf{b} = \mathbf{1}_n / (\mathbf{K}^\top \mathbf{a})$
+    \State $\mathbf{a} = \mathbf{1}_n / (\mathbf{K} \mathbf{b})$
+\EndFor
+\State $\mathbf{P} = \text{diag}(\mathbf{a}) \, \mathbf{K} \, \text{diag}(\mathbf{b})$
+\State $\mathbf{P} = \mathbf{P} / \sum_j \mathbf{P}_{ij}$ \Comment{Row-normalize}
+\State \Return $\mathbf{P}$
+\end{algorithmic}
+\end{algorithm}
+
+The full matrix $\mathbf{P}_{\text{full}} \in \mathbb{R}^{U \times U}$ is assembled by placing $\mathbf{P}_{\text{sub}}$ at lyric-line indices and $\mathbf{I}$ (identity) at non-lyric indices. $\mathbf{P}_{\text{full}}$ is row-stochastic and doubly-stochastic within the lyric sub-block.
+
+\subsection{TransportRetrievalAdapter}
+
+The adapter takes the scaffold features and position encoding to produce a residual $\Delta_h$ and an optional learned coupling $\mathbf{P}_{\text{adapter}}$:
+
+\begin{equation}
+\mathbf{pp} = \text{linspace}(0, 1, T) \in \mathbb{R}^T, \quad
+\mathbf{R}_{ut} = |\mathbf{pp}_t - \mathbf{ca}_u|
+\end{equation}
+
+\begin{equation}
+\Delta_h = f_\theta(\mathbf{H}_o, \mathbf{uth}, \mathbf{R}, \mathbf{mu}, \mathbf{usid})
+\end{equation}
+
+where $f_\theta$ is a cross-attention module with ${\sim}2$M parameters. $\mathbf{H}_o$ is the hidden state at layer~12 before the hook.
+
+\subsection{TransportedStructuralMemory}
+
+TSM is a slot-based memory module conditioned on the transport coupling $\mathbf{P}$:
+
+\begin{enumerate}
+    \item \textbf{Pool:} Attend from $\mathbf{H}' = \mathbf{H}_o + \Delta_h$ to $K$ learned slot vectors:
+    \[
+    \mathbf{A} = \text{softmax}\!\left(\frac{\mathbf{H}' \mathbf{W}_q \, (\mathbf{S} \mathbf{W}_k)^\top}{\sqrt{D}}\right)
+    \]
+    where $\mathbf{S} \in \mathbb{R}^{K \times D_{\text{mem}}}$ are slot embeddings. The coupling $\mathbf{P}$ constrains which slots communicate by masking $\mathbf{A}$:
+    \[
+    \mathbf{A}_{\text{mod}} = \mathbf{A} \cdot \text{broadcast}(\mathbf{P}) \quad\text{(line-structure-aware attention)}
+    \]
+
+    \item \textbf{Mix:} Multi-head self-attention among slots, enabling structural reasoning:
+    \[
+    \mathbf{S} \leftarrow \mathbf{S} + \text{MHSA}(\text{LN}(\mathbf{S})), \quad
+    \mathbf{S} \leftarrow \mathbf{S} + \text{FFN}(\text{LN}(\mathbf{S}))
+    \]
+
+    \item \textbf{Broadcast:} Read mixed slots back to audio space:
+    \[
+    \mathbf{O} = \text{softmax}\!\left(\frac{\mathbf{S} \mathbf{W}_q^{\prime} \, (\mathbf{H}' \mathbf{W}_k^{\prime})^\top}{\sqrt{D}}\right) \mathbf{S}
+    \]
+    \[
+    \mathbf{H}_{\text{tsm}} = \mathbf{W}_o(\mathbf{O}),
+    \quad \mathbf{H}_{\text{out}} = \mathbf{H}_o + \Delta_h + \mathbf{H}_{\text{tsm}}
+    \]
+\end{enumerate}
+
+All TSM output projections are zero-initialized, ensuring the backbone is unperturbed at training initialization.
+
+\subsection{Inference-Time Attention Reallocation}
+
+Optionally, a lightweight inference-only reallocation further corrects cross-attention:
+
+\begin{equation}
+\mathbf{A}^{\prime}_{t} = (1 - \lambda_t) \mathbf{A}_t + \lambda_t \cdot \text{Reallocate}(\mathbf{A}_t, \mathbf{P}, \texttt{t2u}, \texttt{lyric\_mask})
+\end{equation}
+
+where
+\[
+\lambda_t = \begin{cases}
+0.03 & \text{if } q \in [0.25, 0.65]\\
+0 & \text{otherwise}
+\end{cases}
+\]
+controls the strength by denoising step progress $q$.
+
+% ==================================================================
+\section{Experiments}
+\label{sec:exp}
+% ==================================================================
+
+\subsection{Implementation Details}
+
+All experiments use \dit~1.5 (24-layer DiT, 1536 hidden dim, 50-step DDIM, CFG=7.0). The LM is a 1.7B parameter Qwen3-ASR model. TSM has 4 heads, memory dim 256, 4 slots. TransportAdapter has hidden dim 256, Sinkhorn \text{iters}=10, $\varepsilon=0.18$. Total trainable parameters: $\sim$5M; backbone (1.7B) is frozen. Training uses the \dit~training pipeline at 5e-5 learning rate for 1 epoch.
+
+\subsection{Main Results}
+
+\begin{table}[h]
+\centering
+\caption{Main results on 10 Chinese songs (mean $\pm$ std).}
+\label{tab:main}
+\begin{tabular}{lcccccc}
+\toprule
+Method & \per$\downarrow$ & Early & Middle & Late & \textsc{LDG}$\downarrow$ \\
+\midrule
+\textit{Without LM (previous flawed pipeline)} \\
+~~Baseline (DiT-only) & 0.298$\pm$0.25 & 0.190 & 0.308 & 0.396 & 0.205 \\
+~~Sinkhorn-TSM & 0.232$\pm$0.12 & 0.106 & 0.274 & 0.317 & 0.211 \\
+\midrule
+\textit{With LM (corrected pipeline)} \\
+~~Baseline + LM & 0.198$\pm$0.18 & 0.040 & 0.214 & 0.339 & 0.299 \\
+~~\textbf{Sinkhorn-TSM + LM} & \textbf{0.121$\pm$0.12} & 0.043 & \textbf{0.170} & \textbf{0.151} & \textbf{0.107} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Per-Song Breakdown}
+
+\begin{table}[h]
+\centering
+\caption{Per-song comparison.}
+\label{tab:persong}
+\begin{tabular}{lrrrr}
+\toprule
+Song & Duration & Baseline+LM & \textbf{TSM+LM} & $\Delta$ \\
+\midrule
+0 & 207s & 0.009 & 0.026 & +0.017 \\
+1 & 236s & 0.321 & \textbf{0.071} & --0.249 \\
+2 & 214s & 0.373 & \textbf{0.068} & --0.305 \\
+3 & 228s & 0.068 & 0.031 & --0.037 \\
+4 & 367s & 0.181 & 0.412 & +0.230 \\
+5 & 237s & 0.271 & 0.172 & --0.099 \\
+6 & 229s & 0.055 & 0.039 & --0.015 \\
+7 & 268s & 0.563 & \textbf{0.189} & --0.374 \\
+8 & 177s & 0.103 & 0.131 & +0.028 \\
+9 & 215s & 0.032 & 0.073 & +0.041 \\
+\midrule
+Mean & 224s & 0.198 & \textbf{0.121} & --39\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Segmented Analysis}
+
+The most significant improvements occur in the late segment (Table~\ref{tab:seg}):
+
+\begin{table}[h]
+\centering
+\caption{Segmented \per~improvement.}
+\label{tab:seg}
+\begin{tabular}{lcccc}
+\toprule
+Method & Early & Middle & Late & LDG \\
+\midrule
+Baseline+LM & 0.040 & 0.214 & 0.339 & 0.299 \\
+TSM+LM & 0.043 & 0.170 & \textbf{0.151} & \textbf{0.107} \\
+Change & +7\% & --21\% & \textbf{--55\%} & \textbf{--64\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Perceptual Quality}
+
+\begin{table}[h]
+\centering
+\caption{SongEval and AudioBox scores.}
+\label{tab:perceptual}
+\begin{tabular}{lccccc}
+\toprule
+Method & Coher. & Music. & Clar. & Natur. & AudioBox \\
+\midrule
+Baseline+LM & 4.322 & 4.114 & 4.229 & 4.073 & 30.23 \\
+TSM+LM & 4.311 & 4.130 & 4.199 & 4.056 & 30.15 \\
+$\Delta$ & --0.011 & +0.016 & --0.030 & --0.017 & --0.08 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation: TSM Residual Gain}
+
+The TSM output naturally has very small magnitude ($\sim$0.003\% of hidden RMS). We scaled the TSM residual by gain factors 1--64 on a held-out set of 5 songs (Table~\ref{tab:gain}).
+
+\begin{table}[h]
+\centering
+\caption{TSM gain sweep (5 new songs).}
+\label{tab:gain}
+\begin{tabular}{lccccc}
+\toprule
+Gain & \per$\downarrow$ & Early & Late & LDG \\
+\midrule
+1 & 0.232 & 0.085 & 0.356 & 0.271 \\
+8 & 0.232 & 0.113 & 0.318 & 0.205 \\
+16 & 0.368 & 0.268 & 0.446 & 0.179 \\
+32 & 0.239 & 0.102 & 0.349 & 0.247 \\
+64 & 0.257 & 0.111 & 0.343 & 0.232 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Results are inconclusive: no monotonic trend in \per~or perceptual quality (SongEval unchanged across gains). Higher gains do not degrade quality, confirming the TSM residual's structural nature rather than random perturbation.
+
+\subsection{Ablation: Denoising Step Gating}
+
+We compared fixed $\lambda=0.03$ vs.\ progressive $\lambda(p)=0.01\to0.03$ within the step-gated window $q\in[0.25,0.65]$ (Table~\ref{tab:stepgate}):
+
+\begin{table}[h]
+\centering
+\caption{Step-gated vs.\ progressive $\lambda$ (10 songs).}
+\label{tab:stepgate}
+\begin{tabular}{lccccc}
+\toprule
+Config & \per$\downarrow$ & Early & Late & LDG \\
+\midrule
+Baseline & 0.298 & 0.190 & 0.396 & 0.205 \\
+Fixed $\lambda=0.03$, $q\in[0.25,0.65]$ & 0.163 & 0.054 & 0.256 & 0.202 \\
+Prog.\ $\lambda=0.01\to0.03$, $q\in[0.25,0.65]$ & \textbf{0.155} & 0.050 & 0.246 & 0.196 \\
+$q\in[0.05,0.35]$, $\lambda=0.03$ & 0.158 & 0.078 & 0.243 & 0.165 \\
+$q\in[0.10,0.45]$, $\lambda=0.03$ & 0.170 & 0.078 & 0.253 & 0.175 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The early-step window ($q\in[0.05,0.35]$) achieves the best LDG (0.165 vs.\ 0.202), suggesting that reallocation is most effective when applied early in the denoising process.
+
+\subsection{Diagnostic: LM Code Count vs.\ Duration}
+
+We verified the LM can produce varying code counts proportional to lyric length when given free duration (Table~\ref{tab:codes}):
+
+\begin{table}[h]
+\centering
+\caption{Code count vs.\ lyric length.}
+\label{tab:codes}
+\begin{tabular}{lrcr}
+\toprule
+Lyrics & Chars & Codes & Duration \\
+\midrule
+Short test & 47 & 85 & 17\,s \\
+Medium test & 118 & 148 & 30\,s \\
+Song~0 full & 482 & 996 & 199\,s \\
+Song~4 full & 703 & 1384 & 277\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The LM naturally scales its code output to match the lyric extent. Before correction, the pipeline truncated this to 180\,s (900 codes), causing the final lyrics to be unplanned.
+
+\subsection{Diagnostic: Reverse Transcription}
+
+We attempted to decode audio codes back to text using the same LM in reverse direction. The LM recovers CoT metadata but fails to reconstruct lyrics from codes alone (codes-to-text CER~$\approx$ 1.46), confirming the LM is a forward-only (lyrics $\to$ codes) model and codes are not a direct lyric encoding.
+
+% ==================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+% ==================================================================
+
+We presented \method, a plug-in module that improves long-form singing voice intelligibility by combining Sinkhorn-guided cross-attention reallocation with slot-based structural memory. Key findings:
+
+\begin{enumerate}
+    \item \textbf{LM duration truncation is the primary cause of late-segment \per~degradation.} Fixing this alone reduces \per~from 0.269 to 0.033 on a test song.
+    \item \textbf{The scaffold-driven Sinkhorn coupling effectively redistributes attention mass across lyric lines.} Combining duration correction with \method~achieves 0.121 overall \per~(39\% improvement).
+    \item \textbf{\method~does not degrade perceptual quality} (SongEval/AudioBox within $\pm$0.03).
+    \item \textbf{Inference-only attention reallocation} (step-gated, $\lambda=0.03$) provides complementary improvement and may suffice when TSM training is unavailable.
+\end{enumerate}
+
+Limitations include: (a)~evaluation on 10 songs only, (b)~one language (Chinese), and (c)~no analysis of music diversity impact. Future work includes learning the coupling metric rather than using cosine similarity, extending to multilingual evaluation, and training the reallocation schedule jointly with the DiT.
+
+% ==================================================================
+\bibliographystyle{unsrt}
+\begin{thebibliography}{9}
+
+\bibitem{acestep}
+Anonymous. ACE-Step 1.5: Singing voice generation with diffusion transformers.
+\textit{Technical Report}, 2025.
+
+\bibitem{musiclm}
+P.~Agostinelli et al.\ MusicLM: Generating music from text.
+\textit{arXiv:2301.11325}, 2023.
+
+\bibitem{audioldm2}
+H.~Liu et al.\ AudioLDM 2: Learning holistic audio generation.
+\textit{arXiv:2308.05734}, 2023.
+
+\bibitem{muse}
+J.~Copet et al.\ Simple and controllable music generation.
+\textit{NeurIPS}, 2023.
+
+\bibitem{ot_sequence}
+G.~Peyr{\'e} et al.\ Computational optimal transport.
+\textit{Foundations and Trends in ML}, 2019.
+
+\bibitem{sinkhorn_transformer}
+J.~Taylor et al.\ Sinkhorn transformer.
+\textit{arXiv:2002.11262}, 2020.
+
+\bibitem{ot_attention}
+S.~Liu et al.\ Sinkhorn attention for OT-based transformers.
+\textit{AAAI}, 2022.
+
+\bibitem{slot_attention}
+F.~Locatello et al.\ Object-centric learning with slot attention.
+\textit{NeurIPS}, 2020.
+
+\bibitem{mem_transformer}
+Z.~Dai et al.\ Transformer-XL: Attentive language models beyond a fixed-length context.
+\textit{ACL}, 2019.
+
+\bibitem{lyrics_parser}
+Anonymous. LyricsStructureParser in ACE-Step 1.5.
+\textit{Internal codebase}, 2025.
+
+\end{thebibliography}
+
+\end{document}

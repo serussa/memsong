@@ -44,7 +44,7 @@ FILE_INDEXES = {"zh": [0, 10, 20, 30, 40], "en": [0, 10, 20, 30, 40]}
 
 
 def get_duration(entry_idx):
-    """Compute duration from cleaned lyrics: CN chars ×0.45, EN words ×0.45."""
+    """Compute duration from cleaned lyrics: CN chars ×0.45, EN words ×0.55."""
     import re as _re
     with open(TEST_JSONL) as f:
         for i, line in enumerate(f):
@@ -71,7 +71,7 @@ def get_duration(entry_idx):
         return max(20, int(chars * 0.45))
     else:
         words = len(text.split())
-        return max(20, int(words * 0.45))
+        return max(20, int(words * 0.55))
 
 METHODS = {
     "baseline": None,

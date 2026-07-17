@@ -1431,6 +1431,24 @@ class LLMHandler:
                     },
                 }
 
+        # ========== Phase 1.5: Override target_duration from LM metadata ==========
+        # The LM's CoT analysis may determine a different duration than the input.
+        # Phase 2 should generate codes matching the LM's own duration estimate,
+        # not the possibly too-short input target_duration.
+        _lm_meta_dur = metadata.get("duration")
+        if _lm_meta_dur is not None and target_duration is not None:
+            try:
+                _lm_dur = float(_lm_meta_dur)
+                if abs(_lm_dur - target_duration) > 1.0:
+                    logger.info(
+                        f"[Phase 1→2] LM metadata duration={_lm_dur:.0f}s differs from "
+                        f"input target_duration={target_duration:.0f}s. "
+                        f"Using LM duration for Phase 2 codes generation."
+                    )
+                    target_duration = _lm_dur
+            except (ValueError, TypeError):
+                pass
+
         # ========== PHASE 2: Audio Codes Generation ==========
         if is_batch:
             logger.info(f"Batch Phase 2: Generating audio codes for {actual_batch_size} items...")
