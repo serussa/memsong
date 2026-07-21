@@ -221,7 +221,7 @@ def _add_common_training_args(parser: argparse.ArgumentParser) -> None:
 
     # -- Adapter selection ---------------------------------------------------
     g_adapter = parser.add_argument_group("Adapter")
-    g_adapter.add_argument("--adapter-type", type=str, default="lora", choices=["lora", "lokr", "phase_memory"], help="Adapter type: lora (PEFT), lokr (LyCORIS), or phase_memory (Phase Dynamics Memory) (default: lora)")
+    g_adapter.add_argument("--adapter-type", type=str, default="lora", choices=["lora", "lokr", "phase_memory", "section_rope", "pmdc_clock", "pm_retrieval"], help="Adapter type: lora (PEFT), lokr (LyCORIS), phase_memory, section_rope, pmdc_clock, or pm_retrieval (PhaseMemory + LyricRetrievalAdapter) (default: lora)")
 
     # -- LoRA hyperparams ---------------------------------------------------
     g_lora = parser.add_argument_group("LoRA (used when --adapter-type=lora)")
@@ -248,11 +248,70 @@ def _add_common_training_args(parser: argparse.ArgumentParser) -> None:
     g_pm.add_argument("--phase-mem-init-scale", type=float, default=0.01, help="PhaseMemory state init scale (default: 0.01)")
     g_pm.add_argument("--phase-mem-lr-multiplier", type=float, default=1.0, help="LR multiplier for PhaseMemory params (default: 1.0)")
 
+    # -- PMDC Clock hyperparams ----------------------------------------------
+    g_pmdc = parser.add_argument_group("PMDC Residual Clock / PM-Retrieval (used when --adapter-type=pmdc_clock or pm_retrieval)")
+    g_pmdc.add_argument("--pmdc-hidden-dim", type=int, default=128, help="PMDC clock hidden dim (default: 128)")
+    g_pmdc.add_argument("--pmdc-beta-init", type=float, default=0.05, help="PMDC initial beta (default: 0.05)")
+    g_pmdc.add_argument("--pmdc-beta-max", type=float, default=0.15, help="PMDC max beta (default: 0.15)")
+    g_pmdc.add_argument("--pmdc-use-delta-h", action=argparse.BooleanOptionalAction, default=True, help="Use delta hidden (default: True)")
+    g_pmdc.add_argument("--pmdc-gate-init", type=float, default=0.35, help="PMDC gate init (default: 0.35)")
+    g_pmdc.add_argument("--pmdc-sigma", type=float, default=0.03, help="PMDC bias sigma (default: 0.03)")
+    g_pmdc.add_argument("--pmdc-lambda", type=float, default=0.5, help="PMDC bias lambda (default: 0.5)")
+    g_pmdc.add_argument("--pmdc-max-bias", type=float, default=1.0, help="PMDC max bias clamp (default: 1.0)")
+    g_pmdc.add_argument("--pmdc-w-pbase", type=float, default=0.005, help="PMDC pbase reg weight (default: 0.005)")
+    g_pmdc.add_argument("--pmdc-w-res", type=float, default=0.0, help="PMDC residual L2 reg weight (default: 0.0)")
+    g_pmdc.add_argument("--pmdc-w-smooth", type=float, default=0.0, help="PMDC log-speed smoothness reg weight (default: 0.0)")
+    g_pmdc.add_argument("--use-controlled-pm", action="store_true", default=False,
+                        help="Use PhaseControlledLyricScaffoldPM (hidden residual + p_dyn)")
+    # -- Transport Retrieval args (used when --adapter-type=pm_retrieval with --use-transport-retrieval) ---
+    g_pmdc.add_argument("--use-transport-retrieval", action="store_true", default=False,
+                        help="Enable unit-level Sinkhorn transport retrieval (replaces token softmax)")
+    g_pmdc.add_argument("--sinkhorn-iters", type=int, default=5,
+                        help="Log-domain Sinkhorn iterations (default: 5)")
+    g_pmdc.add_argument("--transport-sigma", type=float, default=0.18,
+                        help="Transport cost Gaussian width (default: 0.18)")
+    g_pmdc.add_argument("--transport-qk-scale", type=float, default=1.0,
+                        help="Scale for dynamic QK residual in transport logit (default: 1.0)")
+    g_pmdc.add_argument("--retrieval-adapter-dim", type=int, default=256,
+                        help="Retrieval Q/K/V inner dim (64/128/256, default: 256)")
+
     # -- Checkpointing -------------------------------------------------------
     g_ckpt = parser.add_argument_group("Checkpointing")
     g_ckpt.add_argument("--output-dir", type=str, required=True, help="Output directory for LoRA weights")
     g_ckpt.add_argument("--save-every", type=int, default=10, help="Save checkpoint every N epochs (default: 10)")
     g_ckpt.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint dir to resume from")
+    g_ckpt.add_argument("--max-train-steps", type=int, default=None, help="Max training steps (for smoke tests; None = unlimited)")
+
+    # -- Transport checkpoint for TSM ----------------------------------------
+    g_tckpt = parser.add_argument_group("Transport checkpoint (for TSM experiments)")
+    g_tckpt.add_argument("--transport-ckpt", type=str, default=None,
+                         help="Path to pretrained transport checkpoint (PM + adapter weights)")
+
+    # -- TSM (Transported Structural Memory) ----------------------------------
+    g_tsm = parser.add_argument_group("TSM (Transported Structural Memory)")
+    g_tsm.add_argument("--use-tsm", action="store_true", default=False,
+                       help="Enable Transported Structural Memory module")
+    g_tsm.add_argument("--tsm-mode", type=str, default="sinkhorn_tsm",
+                       choices=["sinkhorn_only", "sinkhorn_pool_broadcast", "sinkhorn_tsm", "softmax_tsm"],
+                       help="TSM mode (default: sinkhorn_tsm)")
+    g_tsm.add_argument("--tsm-layers", type=str, default="12",
+                       help="Comma-separated layer indices for TSM injection (default: 12)")
+    g_tsm.add_argument("--tsm-memory-dim", type=int, default=256,
+                       help="TSM structural slot memory dimension (default: 256)")
+    g_tsm.add_argument("--tsm-num-heads", type=int, default=4,
+                       help="Number of attention heads in TSM slot mixer (default: 4)")
+    g_tsm.add_argument("--tsm-ffn-dim", type=int, default=512,
+                       help="Hidden dimension of TSM slot mixer FFN (default: 512)")
+    g_tsm.add_argument("--tsm-slot-layers", type=int, default=1,
+                       help="Number of TSM slot transformer layers (default: 1)")
+    g_tsm.add_argument("--tsm-dropout", type=float, default=0.0,
+                       help="Dropout rate in TSM slot mixer (default: 0.0)")
+    g_tsm.add_argument("--tsm-detach-coupling", action=argparse.BooleanOptionalAction, default=True,
+                       help="Detach coupling before TSM forward (default: True)")
+    g_tsm.add_argument("--tsm-zero-init-output", action=argparse.BooleanOptionalAction, default=True,
+                       help="Zero-initialise TSM output projection (default: True)")
+    g_tsm.add_argument("--tsm-enable-slot-mixer", action=argparse.BooleanOptionalAction, default=True,
+                       help="Enable slot mixer in TSM (default: True)")
 
     # -- Logging / TensorBoard -----------------------------------------------
     g_log = parser.add_argument_group("Logging / TensorBoard")
@@ -274,8 +333,6 @@ def _add_fixed_args(parser: argparse.ArgumentParser) -> None:
     """Add arguments specific to the fixed subcommand."""
     g = parser.add_argument_group("Corrected training")
     g.add_argument("--cfg-ratio", type=float, default=0.15, help="CFG dropout probability (default: 0.15)")
-
-
 
 def _add_estimation_args(parser: argparse.ArgumentParser) -> None:
     """Add arguments for the estimate subcommand."""

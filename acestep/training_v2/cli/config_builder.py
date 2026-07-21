@@ -12,7 +12,13 @@ import logging
 from pathlib import Path
 from typing import Tuple, Union
 
-from acestep.training_v2.configs import LoRAConfigV2, LoKRConfigV2, PhaseMemoryConfigV2, TrainingConfigV2
+from acestep.training_v2.configs import (
+    LoRAConfigV2,
+    LoKRConfigV2,
+    PMDCConfigV2,
+    PhaseMemoryConfigV2,
+    TrainingConfigV2,
+)
 from acestep.training_v2.gpu_utils import detect_gpu
 from acestep.training_v2.cli.args import VARIANT_DIR_MAP
 from acestep.training_v2.cli.validation import resolve_target_modules
@@ -116,6 +122,20 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
             init_scale=getattr(args, "phase_mem_init_scale", 0.01),
             attention_type=attention_type,
         )
+    elif adapter_type in ("pmdc_clock", "pm_retrieval"):
+        adapter_cfg = PMDCConfigV2(
+            hidden_dim=getattr(args, "pmdc_hidden_dim", 128),
+            beta_init=getattr(args, "pmdc_beta_init", 0.05),
+            beta_max=getattr(args, "pmdc_beta_max", 0.15),
+            use_delta_h=getattr(args, "pmdc_use_delta_h", True),
+            gate_init=getattr(args, "pmdc_gate_init", 0.35),
+            sigma=getattr(args, "pmdc_sigma", 0.03),
+            lambda_=getattr(args, "pmdc_lambda", 0.5),
+            max_bias=getattr(args, "pmdc_max_bias", 1.0),
+            w_pbase=getattr(args, "pmdc_w_pbase", 0.02),
+            w_res=getattr(args, "pmdc_w_res", 0.001),
+            w_smooth=getattr(args, "pmdc_w_smooth", 0.001),
+        )
     else:
         adapter_cfg = LoRAConfigV2(
             r=args.rank,
@@ -141,6 +161,25 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
 
     # -- Training config ----------------------------------------------------
     train_cfg = TrainingConfigV2(
+        pmdc_hidden_dim=getattr(args, "pmdc_hidden_dim", 128),
+        pmdc_beta_init=getattr(args, "pmdc_beta_init", 0.05),
+        pmdc_beta_max=getattr(args, "pmdc_beta_max", 0.15),
+        pmdc_use_delta_h=getattr(args, "pmdc_use_delta_h", True),
+        pmdc_gate_init=getattr(args, "pmdc_gate_init", 0.35),
+        pmdc_sigma=getattr(args, "pmdc_sigma", 0.03),
+        pmdc_lambda=getattr(args, "pmdc_lambda", 0.5),
+        pmdc_max_bias=getattr(args, "pmdc_max_bias", 1.0),
+        pmdc_w_pbase=getattr(args, "pmdc_w_pbase", 0.02),
+        pmdc_w_res=getattr(args, "pmdc_w_res", 0.001),
+        pmdc_w_smooth=getattr(args, "pmdc_w_smooth", 0.001),
+        use_controlled_pm=getattr(args, "use_controlled_pm", False),
+        use_transport_retrieval=getattr(args, "use_transport_retrieval", False),
+        sinkhorn_iters=getattr(args, "sinkhorn_iters", 5),
+        transport_sigma=getattr(args, "transport_sigma", 0.18),
+        transport_qk_scale=getattr(args, "transport_qk_scale", 1.0),
+        retrieval_adapter_dim=getattr(args, "retrieval_adapter_dim", 256),
+        residual_scale=getattr(args, "residual_scale", 0.01),
+        kl_weight=getattr(args, "kl_weight", 0.001),
         shift=getattr(args, "shift", 3.0),
         num_inference_steps=getattr(args, "num_inference_steps", 8),
         learning_rate=args.learning_rate,
@@ -190,6 +229,20 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
         dataset_json=args.dataset_json,
         tensor_output=args.tensor_output,
         max_duration=args.max_duration,
+        # TSM
+        use_tsm=getattr(args, "use_tsm", False),
+        tsm_mode=getattr(args, "tsm_mode", "sinkhorn_tsm"),
+        tsm_layers_str=getattr(args, "tsm_layers", "12"),
+        tsm_memory_dim=getattr(args, "tsm_memory_dim", 256),
+        tsm_num_heads=getattr(args, "tsm_num_heads", 4),
+        tsm_ffn_dim=getattr(args, "tsm_ffn_dim", 512),
+        tsm_slot_layers=getattr(args, "tsm_slot_layers", 1),
+        tsm_dropout=getattr(args, "tsm_dropout", 0.0),
+        tsm_detach_coupling=getattr(args, "tsm_detach_coupling", True),
+        tsm_zero_init_output=getattr(args, "tsm_zero_init_output", True),
+        tsm_enable_slot_mixer=getattr(args, "tsm_enable_slot_mixer", True),
+        transport_ckpt=getattr(args, "transport_ckpt", None),
+        max_train_steps=getattr(args, "max_train_steps", None),
     )
 
     return adapter_cfg, train_cfg

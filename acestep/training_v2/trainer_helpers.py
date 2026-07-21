@@ -28,6 +28,7 @@ from acestep.training.phase_memory_checkpoint import (
     save_phase_memory_weights,
     verify_phase_memory_weights,
 )
+from acestep.tgca.section_rope import SectionRoPEOffset
 from acestep.training_v2.ui import TrainingUpdate
 
 logger = logging.getLogger(__name__)
@@ -171,6 +172,72 @@ def save_adapter_flat(trainer: Any, output_dir: str) -> None:
         lokr_meta = {"lokr_config": module.adapter_config.to_dict()}
         save_lokr_weights(module.lycoris_net, output_dir, metadata=lokr_meta)
 
+    elif trainer.adapter_type == "pmdc_clock":
+        pmdc_path = os.path.join(output_dir, "pmdc_clock.pt")
+        # Get clock from module attribute or model's registered submodule
+        clock = getattr(module, "pmdc_clock", None)
+        if clock is None and hasattr(module, "model"):
+            clock = getattr(module.model, "pmdc_clock", None)
+        if clock is None:
+            raise RuntimeError("pmdc_clock not found on module or model — cannot save")
+        gate = getattr(module, "pmdc_gate_logit", None)
+        if gate is None and hasattr(module, "model"):
+            gate = getattr(module.model, "pmdc_gate_logit", None)
+        state = {
+            "clock_state_dict": clock.state_dict(),
+            "pmdc_gate_logit": gate.data.cpu() if gate is not None else None,
+            "pmdc_config": module.pmdc_config.to_dict() if hasattr(module.pmdc_config, "to_dict") else {},
+        }
+        torch.save(state, pmdc_path)
+        logger.info("[OK] PMDC Clock saved to %s", pmdc_path)
+
+    elif trainer.adapter_type == "pm_retrieval":
+        pm_path = os.path.join(output_dir, "pm_retrieval.pt")
+        pmr = getattr(module, "_pmr", None)
+        pm = pmr.get("pm") if pmr is not None else None
+        if pm is None and hasattr(module, "model") and hasattr(module.model, "pm_retrieval_pm"):
+            pm = module.model.pm_retrieval_pm
+        adapt = pmr.get("adapter") if pmr is not None else None
+        if adapt is None and hasattr(module, "model") and hasattr(module.model, "pm_retrieval_adapter"):
+            adapt = module.model.pm_retrieval_adapter
+        pm_sd = pm.state_dict() if pm is not None else {}
+        adapt_sd = adapt.state_dict() if adapt is not None else {}
+        state = {
+            "phase_memory": pm_sd,
+            "retrieval_adapter": adapt_sd,
+        }
+
+        # ---- TSM module (optional) ------------------------------------------
+        tsm = getattr(module.model, 'tsm_module', None)
+        if tsm is not None:
+            state["tsm_module"] = tsm.state_dict()
+            state["tsm_mode"] = getattr(module.model, '_tsm_mode', 'sinkhorn_tsm')
+            logger.info("[TSM] Including TSM in checkpoint (mode=%s, %d tensors)",
+                        state["tsm_mode"], len(state["tsm_module"]))
+
+        # Validate
+        tensor_count = len(pm_sd) + len(adapt_sd)
+        param_count = sum(t.numel() for t in pm_sd.values()) + sum(t.numel() for t in adapt_sd.values())
+        if tsm is not None:
+            tsm_sd = state["tsm_module"]
+            tensor_count += len(tsm_sd)
+            param_count += sum(t.numel() for t in tsm_sd.values())
+        if tensor_count == 0:
+            raise RuntimeError(
+                "PM-Retrieval checkpoint has 0 tensors — nothing to save. "
+                "Check that pm_retrieval_pm and pm_retrieval_adapter are attached."
+            )
+
+        all_keys = list(pm_sd.keys()) + list(adapt_sd.keys())
+        if tsm is not None:
+            all_keys += list(state["tsm_module"].keys())
+        logger.info("[PM-Retrieval] Saving %d tensors (%d params)", tensor_count, param_count)
+        logger.info("[PM-Retrieval] First 20 keys: %s", all_keys[:20])
+
+        torch.save(state, pm_path)
+        file_size_kb = os.path.getsize(pm_path) / 1024
+        logger.info("[OK] PM-Retrieval weights saved to %s (%.1f KB)", pm_path, file_size_kb)
+
     elif trainer.adapter_type == "phase_memory":
         if not hasattr(module.model, "state_dict"):
             raise RuntimeError(
@@ -181,6 +248,27 @@ def save_adapter_flat(trainer: Any, output_dir: str) -> None:
         pm_meta["trainable_params"] = module.adapter_info.get("trainable_params", 0)
         pm_meta["total_params"] = module.adapter_info.get("total_params", 0)
         save_phase_memory_weights(module.model, output_dir, metadata=pm_meta)
+
+    elif trainer.adapter_type == "section_rope":
+        # Collect all SectionRoPEOffset state dicts with module path prefix
+        section_rope_sd = {}
+        for name, submod in module.model.named_modules():
+            if isinstance(submod, SectionRoPEOffset):
+                for pname, p in submod.state_dict().items():
+                    section_rope_sd[f"{name}.{pname}"] = p
+        if not section_rope_sd:
+            logger.warning("[Section-RoPE] No SectionRoPEOffset modules found -- nothing to save")
+            return
+
+        from safetensors.torch import save_file as _save_safetensors
+
+        out_path = os.path.join(output_dir, "adapter_model.safetensors")
+        _save_safetensors(section_rope_sd, out_path)
+        logger.info(
+            "[OK] Section-RoPE adapter saved: %s keys -> %s (%.1f KB)",
+            len(section_rope_sd), out_path,
+            os.path.getsize(out_path) / 1024,
+        )
 
     else:
         # Access the decoder directly (PeftModel after LoRA injection,
@@ -275,6 +363,14 @@ def verify_saved_adapter(output_dir: str) -> None:
         pm_path = os.path.join(output_dir, "phase_memory_weights.safetensors")
         if os.path.exists(pm_path):
             verify_phase_memory_weights(output_dir)
+            return
+        pmdc_path = os.path.join(output_dir, "pmdc_clock.pt")
+        if os.path.exists(pmdc_path):
+            logger.info("[OK] PMDC Clock weights found: %s", pmdc_path)
+            return
+        pm_ret_path = os.path.join(output_dir, "pm_retrieval.pt")
+        if os.path.exists(pm_ret_path):
+            logger.info("[OK] PM-Retrieval weights found: %s", pm_ret_path)
             return
         logger.warning(
             "[WARN] No adapter weights found in %s -- check save path",
@@ -402,6 +498,57 @@ def resume_checkpoint(
             return (epoch, step)
         yield TrainingUpdate(
             0, 0.0, "[OK] PhaseMemory weights loaded (no training state)", kind="info"
+        )
+        return None
+
+    # -- Detect PM-Retrieval format -------------------------------------------
+    pm_ret_path = ckpt_dir / "pm_retrieval.pt"
+    if pm_ret_path.exists():
+        saved = torch.load(str(pm_ret_path), map_location=module.device, weights_only=False)
+        pm_sd = saved.get("phase_memory", {})
+        adapt_sd = saved.get("retrieval_adapter", {})
+
+        pmr = getattr(module, "_pmr", None)
+        if pmr is not None:
+            if pmr.get("pm") is not None:
+                missing, unexpected = pmr["pm"].load_state_dict(pm_sd, strict=False)
+                logger.info("[PM-Retrieval] Loaded PhaseMemory: %d tensors, missing=%d, unexpected=%d",
+                            len(pm_sd), len(missing), len(unexpected))
+            if pmr.get("adapter") is not None:
+                missing, unexpected = pmr["adapter"].load_state_dict(adapt_sd, strict=False)
+                logger.info("[PM-Retrieval] Loaded Adapter: %d tensors, missing=%d, unexpected=%d",
+                            len(adapt_sd), len(missing), len(unexpected))
+
+        # ---- TSM module (optional) -----------------------------------------
+        tsm_sd = saved.get("tsm_module", None)
+        if tsm_sd is not None:
+            tsm = getattr(module.model, 'tsm_module', None)
+            if tsm is not None:
+                missing, unexpected = tsm.load_state_dict(tsm_sd, strict=False)
+                logger.info("[TSM] Loaded TSM: %d tensors, missing=%d, unexpected=%d",
+                            len(tsm_sd), len(missing), len(unexpected))
+                if "tsm_mode" in saved:
+                    module.model._tsm_mode = saved["tsm_mode"]
+                    logger.info("[TSM] Restored tsm_mode=%s", saved["tsm_mode"])
+            else:
+                logger.warning("[TSM] Checkpoint contains TSM weights but model has no tsm_module")
+
+        if state_path.exists():
+            state = torch.load(str(state_path), map_location=module.device, weights_only=False)
+            epoch = state.get("epoch", 0)
+            step = state.get("global_step", 0)
+            if "optimizer_state_dict" in state:
+                optimizer.load_state_dict(state["optimizer_state_dict"])
+            if "scheduler_state_dict" in state:
+                scheduler.load_state_dict(state["scheduler_state_dict"])
+            yield TrainingUpdate(
+                0, 0.0,
+                f"[OK] Resumed PM-Retrieval from epoch {epoch}, step {step}",
+                kind="info",
+            )
+            return (epoch, step)
+        yield TrainingUpdate(
+            0, 0.0, "[OK] PM-Retrieval weights loaded (no training state)", kind="info"
         )
         return None
 

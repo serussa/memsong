@@ -1,0 +1,4 @@
+variant,mean_marginal_error,std_marginal_error,num_samples,note
+full,3.323853068337712e-08,9.23634803830119e-09,10,Full state-cost comparison requires paired full vs transport_only samples with identical prompt ordering.
+softmax_adapter,0.021171041391789915,0.001601825313052571,10,Full state-cost comparison requires paired full vs transport_only samples with identical prompt ordering.
+transport_only,3.706673581405084e-08,4.667974818274714e-09,10,Full state-cost comparison requires paired full vs transport_only samples with identical prompt ordering.

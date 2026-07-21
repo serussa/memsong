@@ -10,6 +10,7 @@ the Fabric loop, but uses manual ``loss.backward()`` and
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
@@ -18,7 +19,6 @@ from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import torch
 
-from acestep.phase_memory import PhaseMemory
 from acestep.training_v2.optim import build_optimizer, build_scheduler
 from acestep.training_v2.tensorboard_utils import TrainingLogger
 from acestep.training_v2.trainer_helpers import configure_memory_features, save_checkpoint, save_final
@@ -64,6 +64,9 @@ def _flush_accumulated(
 
     torch.nn.utils.clip_grad_norm_(trainable_params, cfg.max_grad_norm)
 
+    # Capture grad norms after backward, before optimizer zeros them.
+    module._pmr_capture_grads()
+
     optimizer.step()
     scheduler.step()
     optimizer.zero_grad(set_to_none=True)
@@ -76,9 +79,12 @@ def _flush_accumulated(
     if global_step % cfg.log_every == 0:
         tb.log_loss(avg_loss, global_step)
         tb.log_lr(_lr, global_step)
+
+        msg = f"Epoch {epoch + 1}, Step {global_step}, Loss: {avg_loss:.4f}"
+
         updates.append(TrainingUpdate(
             step=global_step, loss=avg_loss,
-            msg=f"Epoch {epoch + 1}, Step {global_step}, Loss: {avg_loss:.4f}",
+            msg=msg,
             kind="step", epoch=epoch + 1, max_epochs=cfg.max_epochs, lr=_lr,
             steps_per_epoch=steps_per_epoch,
         ))
@@ -87,7 +93,8 @@ def _flush_accumulated(
         tb.log_per_layer_grad_norms(module.model, global_step)
 
     # ---- PhaseMemory gate monitoring (no impact on training) ----
-    _log_phase_memory_gate(module, tb, global_step)
+    _log_transport_diag(module, tb, global_step)
+    _log_section_rope_diag(module, tb, global_step)
 
     return global_step, avg_loss, updates
 
@@ -141,6 +148,8 @@ def run_basic_training_loop(
 
     steps_per_epoch = max(1, math.ceil(len(train_loader) / cfg.gradient_accumulation_steps))
     total_steps = steps_per_epoch * cfg.max_epochs
+    save_every_n_steps = getattr(cfg, 'save_every_n_steps', 500)
+    best_loss = float('inf')
 
     scheduler = build_scheduler(
         optimizer,
@@ -153,15 +162,25 @@ def run_basic_training_loop(
 
     # -- Training memory features (same as Fabric path) ----------------
     if getattr(cfg, "gradient_checkpointing", True):
-        ckpt_ok, cache_off, grads_ok = configure_memory_features(module.model.decoder)
-        module.force_input_grads_for_checkpointing = ckpt_ok
-        if ckpt_ok:
+        # TSM uses hook-based hidden state injection, which is
+        # incompatible with gradient checkpointing.
+        if getattr(cfg, "use_tsm", False):
             yield TrainingUpdate(
                 0, 0.0,
-                f"[INFO] Gradient checkpointing enabled "
-                f"(use_cache={not cache_off}, input_grads={grads_ok})",
-                kind="info",
+                "[INFO] Gradient checkpointing DISABLED (TSM requires hook-based "
+                "gradient flow; checkpointing would detach TSM from autograd)",
+                kind="warn",
             )
+        else:
+            ckpt_ok, cache_off, grads_ok = configure_memory_features(module.model.decoder)
+            module.force_input_grads_for_checkpointing = ckpt_ok
+            if ckpt_ok:
+                yield TrainingUpdate(
+                    0, 0.0,
+                    f"[INFO] Gradient checkpointing enabled "
+                    f"(use_cache={not cache_off}, input_grads={grads_ok})",
+                    kind="info",
+                )
 
     # -- Resume ---------------------------------------------------------
     start_epoch = 0
@@ -221,8 +240,41 @@ def run_basic_training_loop(
                 accumulated_loss = 0.0
                 accumulation_step = 0
 
+                # Step limit for smoke tests
+                max_steps = getattr(cfg, 'max_train_steps', None)
+                if max_steps is not None and global_step >= max_steps:
+                    print(f"\n[INFO] Reached max_train_steps={max_steps}, stopping")
+                    yield TrainingUpdate(global_step, avg_loss,
+                                         f"[INFO] Reached max_train_steps={max_steps}",
+                                         kind="complete")
+                    tb.close()
+                    return
+
                 if torch.cuda.is_available() and global_step % cfg.log_every == 0:
                     torch.cuda.empty_cache()
+
+                # Step-based checkpoint (every 500 steps)
+                if global_step > 0 and global_step % save_every_n_steps == 0:
+                    ckpt_dir = str(output_dir / "checkpoints" / f"step_{global_step}_loss_{avg_loss:.4f}")
+                    save_checkpoint(trainer, optimizer, scheduler, epoch + 1, global_step, ckpt_dir)
+                    pm_diag = getattr(module, 'pm_diag', None)
+                    if pm_diag:
+                        (Path(ckpt_dir) / "diagnostics.json").write_text(json.dumps(pm_diag, indent=2))
+                    yield TrainingUpdate(
+                        step=global_step, loss=avg_loss,
+                        msg=f"[OK] Step checkpoint saved at step {global_step}",
+                        kind="checkpoint", epoch=epoch + 1, max_epochs=cfg.max_epochs,
+                        checkpoint_path=ckpt_dir,
+                    )
+
+                # Best-loss checkpoint
+                if avg_loss < best_loss:
+                    best_loss = avg_loss
+                    best_dir = str(output_dir / "checkpoints" / "best_loss")
+                    save_checkpoint(trainer, optimizer, scheduler, epoch + 1, global_step, best_dir)
+                    pm_diag = getattr(module, 'pm_diag', None)
+                    if pm_diag:
+                        (Path(best_dir) / "diagnostics.json").write_text(json.dumps(pm_diag, indent=2))
 
         # Flush remainder
         if accumulation_step > 0:
@@ -298,107 +350,69 @@ def run_basic_training_loop(
 # PhaseMemory gate monitoring (no impact on training / no graph mutations)
 # ---------------------------------------------------------------------------
 
-def _log_phase_memory_gate(module: Any, tb: Any, global_step: int) -> None:
-    """Log gate statistics from any PhaseMemory sub-module found in the model.
 
-    Scans the model for PhaseMemory instances and logs:
-    - phase_memory/g_mean  (scalar write gate average)
-    - phase_memory/g_std   (scalar write gate std)
-    - phase_memory/r_mean  (scalar read gate average)
-    - phase_memory/r_std   (scalar read gate std)
+def _log_transport_diag(module: Any, tb: Any, global_step: int) -> None:
+    """Log transport/TSM diagnostics from ``module.pm_diag``.
 
-    If no PhaseMemory module is found, silently returns.
+    Hits every 50 steps.  Logs Sinkhorn coupling, delta_h, TSM slot
+    statistics to TensorBoard.
     """
     log_every = 50
     if global_step % log_every != 0:
         return
 
-    def _as_float(value: Any) -> Optional[float]:
-        if value is None:
-            return None
-        if isinstance(value, torch.Tensor):
-            if value.numel() == 0:
-                return None
-            return float(value.detach().float().item())
+    diag = getattr(module, "pm_diag", None)
+    if not diag:
+        return
+
+    info_parts = []
+    for key, value in diag.items():
+        label = f"transport/{key}"
         try:
-            return float(value)
+            val = float(value)
+            info_parts.append(f"{key}={val:.6e}")
+            if tb is not None:
+                tb.log_scalar(label, val, global_step)
         except (TypeError, ValueError):
-            return None
-
-    stats: Dict[str, List[float]] = {
-        "g_mean": [],
-        "g_std": [],
-        "r_mean": [],
-        "r_std": [],
-        "omega_mean": [],
-        "omega_std": [],
-        "zmag_mean": [],
-        "zmag_max": [],
-    }
-
-    for child in module.model.modules():
-        if not isinstance(child, PhaseMemory):
-            continue
-        g_mean = _as_float(getattr(child, "last_g_mean", None))
-        g_std = _as_float(getattr(child, "last_g_std", None))
-        r_mean = _as_float(getattr(child, "last_r_mean", None))
-        r_std = _as_float(getattr(child, "last_r_std", None))
-        omega_mean = _as_float(getattr(child, "last_omega_mean", None))
-        omega_std = _as_float(getattr(child, "last_omega_std", None))
-        zmag_mean = _as_float(getattr(child, "last_zmag_mean", None))
-        zmag_max = _as_float(getattr(child, "last_zmag_max", None))
-
-        if g_mean is None:
             continue
 
-        stats["g_mean"].append(g_mean)
-        stats["g_std"].append(g_std or 0.0)
-        stats["r_mean"].append(r_mean or 0.0)
-        stats["r_std"].append(r_std or 0.0)
-        stats["omega_mean"].append(omega_mean or 0.0)
-        stats["omega_std"].append(omega_std or 0.0)
-        stats["zmag_mean"].append(zmag_mean or 0.0)
-        stats["zmag_max"].append(zmag_max or 0.0)
+    if info_parts:
+        logger.info("[Transport-Diag] %s", "  ".join(info_parts))
 
-    if not stats["g_mean"]:
+
+SECTION_NAMES = {0: "UNKNOWN", 1: "INTRO", 2: "VERSE", 3: "PRECHORUS", 4: "CHORUS", 5: "BRIDGE", 6: "OUTRO", 7: "INSTR"}
+
+
+def _log_section_rope_diag(module, tb, global_step):
+    """Log Section-RoPE Offset diagnostics every 50 steps."""
+    log_every = 50
+    if global_step % log_every != 0:
+        return
+    diag = getattr(module, "section_rope_diag", None)
+    if not diag:
         return
 
-    def _mean(values: List[float]) -> float:
-        return sum(values) / max(len(values), 1)
+    scalar_parts = []
+    per_type_parts = []
 
-    g_mean = _mean(stats["g_mean"])
-    g_std = _mean(stats["g_std"])
-    r_mean = _mean(stats["r_mean"])
-    r_std = _mean(stats["r_std"])
-    omega_mean = _mean(stats["omega_mean"])
-    omega_std = _mean(stats["omega_std"])
-    zmag_mean = _mean(stats["zmag_mean"])
-    zmag_max = _mean(stats["zmag_max"])
+    for key, value in diag.items():
+        label = f"section_rope/{key}"
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            continue
 
-    if any(math.isnan(v) for v in (g_mean, g_std, r_mean, r_std, omega_mean, omega_std, zmag_mean, zmag_max)):
-        logger.warning("[PM] NaN detected in PhaseMemory diagnostics")
-        return
+        if key.startswith("norm_type_"):
+            sid = int(key.split("_")[-1])
+            name = SECTION_NAMES.get(sid, f"T{sid}")
+            per_type_parts.append(f"{name}={val:.4f}")
+        else:
+            scalar_parts.append(f"{key}={val:.4f}")
 
-    logger.info(
-        "[PM] "
-        f"g={g_mean:.4f}±{g_std:.4f} "
-        f"r={r_mean:.4f}±{r_std:.4f} "
-        f"omega={omega_mean:.4f}±{omega_std:.4f} "
-        f"zmag={zmag_mean:.4f} "
-        f"zmax={zmag_max:.4f}"
-    )
+        if tb is not None:
+            tb.log_scalar(label, val, global_step)
 
-    if g_mean < 0.01:
-        logger.warning("[PM] Gate collapse detected (g_mean < 0.01)")
-    if g_mean > 0.99:
-        logger.warning("[PM] Gate saturation detected (g_mean > 0.99)")
-    if omega_mean < 1e-3:
-        logger.warning("[PM] Omega collapse detected (omega_mean < 1e-3)")
-    if zmag_max > 5.0:
-        logger.warning("[PM] zmag explosion detected (zmag_max > 5.0)")
-
-    if tb is not None:
-        tb.log_scalar("phase_memory/g_mean", g_mean, global_step)
-        tb.log_scalar("phase_memory/g_std", g_std, global_step)
-        tb.log_scalar("phase_memory/r_mean", r_mean, global_step)
-        tb.log_scalar("phase_memory/r_std", r_std, global_step)
+    if scalar_parts:
+        logger.info("[Section-RoPE] %s", "  ".join(scalar_parts))
+    if per_type_parts:
+        logger.info("[Section-RoPE]   per-type: %s", "  ".join(per_type_parts))

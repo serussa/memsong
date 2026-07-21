@@ -1,0 +1,242 @@
+[
+  {
+    "variant": "baseline",
+    "prompt_id": "song_ballad",
+    "seed": "0",
+    "transcript": "When the night falls quietly, and the stars begin to gleam, I recall the days we shared, I can never ending dream, I will wait for you my love, underneath the sky above, Though the seasons come and go, my heart will always know, The autumn leaves have turned to gold, a story waiting sky above, Though the seasons come and go, my heart will always know, Time may fade the memory, but you'll always be part of me, I will wait for you my love,"
+  },
+  {
+    "variant": "baseline",
+    "prompt_id": "song_ballad",
+    "seed": "1",
+    "transcript": "When the night falls quietly and the stars begin to gleam, I recall the days we shared, I can never end in dream, I will wait for you, my love, underneath the sky above, Though the seasons come, my heart will always know, they autumn leaves have turned to gold, A story waiting to be told, I wait for you, my love, I will wait for you, my love, underneath the sky above, though the seasons come, my heart will always know, I may say the memory for you always be part of me, I will wait for you, my love, I will wait for you, my love,"
+  },
+  {
+    "variant": "baseline",
+    "prompt_id": "song_folk",
+    "seed": "0",
+    "transcript": "我同的地身再回答西洋人紅冷村中故鄉啊故鄉你是我最深的向往我人走到什麼地方心都超著你的方向小喝的水雅清油涼西洋的姑娘清生長木同的地身再回答西洋的姑娘清生長不像啦故鄉你是我最深的向往我人走到什麼地方心都超著你的方向"
+  },
+  {
+    "variant": "baseline",
+    "prompt_id": "song_folk",
+    "seed": "1",
+    "transcript": "……山間的削路顽誤艙風吹脱咒暇木通的地深在回答是让人红了尊重故鄉你是我最深的想望无论走的哥们地方行都超着你的方向小河的水呀 请有良请受良新一的姑娘 清身长故鄉啊 故鄉你是我最深的想望无论走到这么地方行都超着你的方向"
+  },
+  {
+    "variant": "baseline",
+    "prompt_id": "song_pop",
+    "seed": "0",
+    "transcript": "祝你你在月光下我督自走回忆入朝用上心头曾经的笑现在的愁都花作一杯苦酒风吹过我也飘散你的影间心间缘爱你是为了有我不再拍坏的流就算世界点到黑白我依然为你守候城市的夜里后闪说你的轮跨不安在你是为了有让我不再拍坏的流就算世界点到黑白我依然为你守候我依然为你"
+  },
+  {
+    "variant": "baseline",
+    "prompt_id": "song_pop",
+    "seed": "1",
+    "transcript": "都花左一杯哭酒风吹过落夜飘散你的影间心间缘爱你是为遇遇遇让我不再拍坏多流就算世界见到黑白我依然为你说好城市的夜你哭山说你的问过一人情深爱你是为遇遇让我不再拍坏多流就算世界见到黑白我依然为你说好"
+  },
+  {
+    "variant": "baseline",
+    "prompt_id": "song_rnb",
+    "seed": "0",
+    "transcript": "Nice Rivers Revered It went F Magic So cruel and let's begin We're supposed to be in my ear Tell me that you're always here Feel the rhythm of my heart And everyone will be apart Baby, all my shining stars I'm shining star No matter where you are Holding onto what we have All we love will always let us Lays each Sunday's morning Hey, all's inside your love again Baby, all my shining stars I'm shining star No matter where you are Holding onto what we have All we love will always let us Holding onto what we have All we love will always let us"
+  },
+  {
+    "variant": "baseline",
+    "prompt_id": "song_rnb",
+    "seed": "1",
+    "transcript": "Ooh All right, dessin on your skin So Bay Drew Love begin with spur softly in my ear Tell me that you're always here Feel the rhythm of my heart Never wanna be apart Baby, you're my shining star No matter where you are Holding on the world we have I love love will always last Lays he's Sunday's morning haze Lost inside your loving gaze Baby, you're my shining star No matter where you are Holding on the world we have I love love will always last"
+  },
+  {
+    "variant": "baseline",
+    "prompt_id": "song_rock",
+    "seed": "0",
+    "transcript": "We come to the morning light another day another fight I've been running through the night trying to make things right Can you feel the fire burning no more turning back? We are young, we are free, breaking chains and lastly Shout it out, let them see this is our destiny We are young, we are free, breaking chains and lastly Shout it out, let them see this is our destiny We're young, we are free, breaking chains and lastly Shout it out, let them see this is our destiny We are young, we are free, breaking chains and lastly Shout it out, let them see this is our destiny"
+  },
+  {
+    "variant": "baseline",
+    "prompt_id": "song_rock",
+    "seed": "1",
+    "transcript": "繞 We are young, we are free, breaking chains endlessly Shout it out, let them see, this is our destiny We are young, we are free, breaking chains endlessly Shout it out, let them see Even when the dark clouds rose, I will never lose control We are young, we are free, breaking chains endlessly We are young, we are free, breaking chains endlessly"
+  },
+  {
+    "variant": "full",
+    "prompt_id": "song_ballad",
+    "seed": "0",
+    "transcript": "When the night falls quietly, and the stars begin to gleam, I recall the days we shared, like an ever-ending dream. I will life for you, my love, Underneath the sky above, The autumn leaves have turned to glow, A story waiting to be told. A story waiting to be told. I will life for you, my love, Underneath the sky above, The seasons come and go. I will wait for you, my love."
+  },
+  {
+    "variant": "full",
+    "prompt_id": "song_ballad",
+    "seed": "1",
+    "transcript": "When the night falls quietly, and the stars begin to gleam, I recall the days We shared like an ever-ending dream I will wait for you my love, underneath the sky above Though the seasons come and go, my heart will always know The autumn leaves have turned to gold, the autumn leaves have turned to gold A story waiting to be told, oh, I will wait for you my love, underneath the sky above Summer's at the memory, but always be for me I will wait for you my love"
+  },
+  {
+    "variant": "full",
+    "prompt_id": "song_folk",
+    "seed": "0",
+    "transcript": "ух山间的órioloouan pā船风吹麦浪沙沙香木通的地生在回当西洋人红了尊装故鄉了故鄉你是我最深的想望无论走到这么低地方心都超着你的方向无论走到这么低地方无论走到这么低地方无论走到这么低地方小河的水呀 请有两西的姑娘请生长小河的水呀 请有两西的姑娘请生长无论走到这么低地方无论走到这么低地方这你一个方向无论走到这么低地方"
+  },
+  {
+    "variant": "full",
+    "prompt_id": "song_folk",
+    "seed": "1",
+    "transcript": "大課珍贵 的 笑露我有偿風吹 玛浪小 沙雅不同的逼声再回答洗一样让红了尊重故乡了故乡你是我最深的向往无论走的那么的地方心都照着你的方向故乡了故乡你是我最深的向往无论走的那么的地方心都照着你的方向故乡了故乡"
+  },
+  {
+    "variant": "full",
+    "prompt_id": "song_pop",
+    "seed": "0",
+    "transcript": "owners Empress在月光下我都自走回入著用生心dome曾经的想 servant不现在的愁都花作一杯苦酒风吹过落叶飘散你的意见心间缘爱你是为了让我不在太坏多了就算世界点到黑白我依然为你守候真是的你后闪说你的轮哭依然听声爱你是为了让我不在太坏多了就算世界点到黑白我依然为你守候"
+  },
+  {
+    "variant": "full",
+    "prompt_id": "song_pop",
+    "seed": "1",
+    "transcript": "我花作一杯苦酒风水果落夜飘散你的意见心见愿爱你是为你理由让我不再太坏走流就算世界点到黑白我依然为你受落城市的夜你红山说你的顿快乐情声爱你是为你理由爱你是为你理由让我不再太坏走流就算世界点到黑白我依然为你受落就算世界点到黑白"
+  },
+  {
+    "variant": "full",
+    "prompt_id": "song_rnb",
+    "seed": "0",
+    "transcript": "Hongjiang Moonlight that's in all your skin Slow-proof, let it love begin Whispers softly in my ear Tell me that you're always here Baby, you're my shining star No matter where you are, you are Holding onto whatever I love it always less And I love it Lazy Sundays morning, hey He's lost inside your love and gaze Baby, you're shining star No matter where you are, holding onto whatever I love it always less"
+  },
+  {
+    "variant": "full",
+    "prompt_id": "song_rnb",
+    "seed": "1",
+    "transcript": "\"..where I am'' moonlight dancing on your skin So cruel that it'll be good Whisper softly in my ear Tell me that you're always here Baby, you're my shining star No matter where you are Oh, hold it on to what we have Oh, I love the way he's left Lazy Sunday's morning, haze lost inside your loving gaze Baby, you're my shining star No matter where you are Oh, then on to what we have Oh, I love the way he's left Oh, I love the way he's left"
+  },
+  {
+    "variant": "full",
+    "prompt_id": "song_rock",
+    "seed": "0",
+    "transcript": "Oh, wake up to the morning light. Another day another fight. I've been running through the night. Trying to make things right. We are young, we are free. Breaking chains endlessly. Shout it out, let them see. This is our destiny. Stand up when the world gets rough. You know you are strong enough. Know you are strong enough. We are young, we are free. Breaking chains endlessly. Shout it out, let them see. This is our destiny. We are young enough."
+  },
+  {
+    "variant": "full",
+    "prompt_id": "song_rock",
+    "seed": "1",
+    "transcript": "We're going to the morning light another day another fight I've been running through the night's right No more turning back we are young we are free breaking chains andlessly Shout it out let them see this is our destiny stand up when the world gets rough you know you are strong enough We are young we are free breaking chains andlessly Shout it out let them see this is our destiny We are young we are free breaking chains andlessly We are young we are free breaking chains andlessly Shout it out"
+  },
+  {
+    "variant": "softmax_adapter",
+    "prompt_id": "song_ballad",
+    "seed": "0",
+    "transcript": "When the night falls quietly and the stars begin to gleam, I recall the days we shared, like a never-ending dream. I will wait for you, my love underneath the sky above, though the seasons come and go, my heart will always know. The autumn leaves have turned to go. A story waiting to be told. I will wait for you, my love underneath the sky above, though the seasons come and go, my heart will always know. Time may fade the memory, but you'll always be part of me. I will wait for you, my love. I will wait for you, my love."
+  },
+  {
+    "variant": "softmax_adapter",
+    "prompt_id": "song_ballad",
+    "seed": "1",
+    "transcript": "When the night falls quietly, And the stars begin to gleam. I recall the days we shared. I can never end dream. I will wait for you, my love, Underneath the sky and go. My heart will always know. The autumn leaves have turned to go. A story waiting to be told. I will wait for you, my love, Underneath the sky and go. Time may fade, the memory. But you'll always be part of me. I will wait for you, my love."
+  },
+  {
+    "variant": "softmax_adapter",
+    "prompt_id": "song_folk",
+    "seed": "0",
+    "transcript": "沙漿的小路溫又長風吹賣浪沙沙香沙漿的小路溫又長風吹賣浪沙沙香木通的地深在回到西陽讓紅了尊狀不像愛姑香你是我最深的想望無論走到什麼地方行都地方溫地希望都超著你的方向沙漿的小路溫又長小路溫又長小路溫又長小路溫又長西陽讓紅了尊狀不像愛姑香你是我最深的想望無論走到什麼地方小路溫又長小路溫又長小路溫又長小路溫又長"
+  },
+  {
+    "variant": "softmax_adapter",
+    "prompt_id": "song_folk",
+    "seed": "1",
+    "transcript": "沉浅的笑如 晚又长 风吹麦浪沙沙香沐同的地身在回当西洋人空的村床故鄉那故鄉 你是是我 结果最深的想望故鄉那故鄉 你是我最深的想望无论走在什么地方 行都朝着你的方向无论走在什么地方 无论走在什么地方小喝在水呀 轻油梁 洗一的姑娘 清身长故鄉那故鄉 你是我最深的想望故鄉那故鄉 那故鄉无论走在什么地方 行都朝着你的方向"
+  },
+  {
+    "variant": "softmax_adapter",
+    "prompt_id": "song_pop",
+    "seed": "0",
+    "transcript": "你的笑 現在的愁都花錯一杯苦酒風水過落葉飄散你的迎見心間遠愛你是為力讓我不再開玩一頭流就算世界點到黑白我依然為你說城市的夜你紅山說你等過一人清說你的愁苦一人清說愛你是為力讓我不再開玩一頭流就算世界點到黑白我依然為你說"
+  },
+  {
+    "variant": "softmax_adapter",
+    "prompt_id": "song_pop",
+    "seed": "1",
+    "transcript": "樂生曾經的笑線在的醜都花作一杯苦酒風吹過落葉飄散你的一間心間遠愛你是為理由讓我不再太懷鬱了就算世界點到黑白我依然為你收盒曾經的夜你紅閃說你的輪廓一人情深愛你是為理由讓我不再太懷鬱了就算世界點到黑白我依然為你收盒女生的電影我依然為你收盒我依然為你收盒我依然為你收盒我依然為你收盒"
+  },
+  {
+    "variant": "softmax_adapter",
+    "prompt_id": "song_rnb",
+    "seed": "0",
+    "transcript": "I'm getting love begin Whisper softly in my ear Tell me that you're always here Feel the rhythm of my heart Never wanna be a part Baby, you're my shining star No matter where you are Holding on to what we have Our love will always last There is a Sunday morning page The Austin side you're loving gaze I'm getting love begin Feel my shining star No matter where you are Holding on to what we have last night"
+  },
+  {
+    "variant": "softmax_adapter",
+    "prompt_id": "song_rnb",
+    "seed": "1",
+    "transcript": "Love begin with spur softly in my ear Tell me that you're always here Feel the rhythm of my heart Never wanna be apart Baby, you're my shining star No matter where you are Baby, you're my shining star Oh, always you're my shining star Lazy Sundays morning days Lost inside your loving gaze Spade on Lazy Sundays time I love the little ways I love the little ways"
+  },
+  {
+    "variant": "softmax_adapter",
+    "prompt_id": "song_rock",
+    "seed": "0",
+    "transcript": "Wake up to the morning light Another day another fight I've been running through the night Trying to make things right Can you feel the fire burning? No more turning back Can you feel the fire burning? No more turning back We are you we are free Breaking chains endlessly Shout it out let them see This is our destiny Stand up when the world gets rough You know you are strong No more turning back We are you we are free Breaking chains endlessly This is our destiny Even when the dark clouds roll I will never lose control We are you we are free Breaking chains endlessly Breaking chains endlessly"
+  },
+  {
+    "variant": "softmax_adapter",
+    "prompt_id": "song_rock",
+    "seed": "1",
+    "transcript": "We come to the morning line, another day another fight. I've been running through the night, trying to make things right. Can you feel the fire burning? No turn it back, we are young, we are free. Break and change endlessly, shout it out at them sea. This is our destiny. We are young, we are free. Break and change endlessly, shout it out at them sea. This is our destiny. Even when the dark clouds roll, I will never lose control. We are young, we are free. Break and change endlessly."
+  },
+  {
+    "variant": "transport_only",
+    "prompt_id": "song_ballad",
+    "seed": "0",
+    "transcript": "When the night falls quietly and the stars begin to gleam, I recall the days we share, Like an everending tree. I will wait for you, my love, Underneath the sky above, Though the seasons come and go, My heart will always know. The autumn leaves have turned to gold, A story waiting to be told. I will wait for you, my love, Underneath the sky above, Though the seasons come and go, My heart will always know. Time may fade the memory, But you'll always be part of me, I will wait for you, my love."
+  },
+  {
+    "variant": "transport_only",
+    "prompt_id": "song_ballad",
+    "seed": "1",
+    "transcript": "When the night falls quietly And the stars begin to gleam I recall the days we shared Like an ever-ending dream I will wait for you my love Underneath the sky above Though the seasons come and go My heart will always know The autumn leaves have turned to gold The story waiting to be told I will wait for you my love Underneath the sky above Though the seasons come and go My heart will always know Time may fade The memory but you always be I will wait for you my love Underneath the sky above The spring breeze The spring breeze The spring breeze The spring breeze"
+  },
+  {
+    "variant": "transport_only",
+    "prompt_id": "song_folk",
+    "seed": "0",
+    "transcript": "空的地身在回当西阳然红了尊重故乡啊 故乡你是我最深的相亡无论走到这么地方心都抄着你的方向心都着你的方向故乡啊 故乡啊小河的水亚清有梁西的姑娘清身长故乡啊 故乡啊 故乡故乡啊 故乡最深的相亡无论走到这里的方向故乡啊故乡啊 故乡啊故乡啊 故乡"
+  },
+  {
+    "variant": "transport_only",
+    "prompt_id": "song_folk",
+    "seed": "1",
+    "transcript": "拍三棵风吹埋郎沙沙香目通的你身在回看西洋人紅的純妝不想啊不想你你是我最深的想望无论走到这么地方行都朝着你的方向小河的水呀清有亮起的姑娘清生唱不想啊不想你你是我最深的想望无论走到这么地方行都朝着你的方向无论走到这么地方"
+  },
+  {
+    "variant": "transport_only",
+    "prompt_id": "song_pop",
+    "seed": "0",
+    "transcript": "小混音我在月光下我都自走回入朝有上心頭曾經的想現在的處都花作一杯酷酒風吹過落葉漂散你的影響心間遠愛你是為理由讓我不再拍外都流就算世界點到一杯微微溼收後城市的夜你紅山說你的噴火也很輕鬆愛你是為理由讓我不再拍外都流就算世界點到一杯微微微溼收後"
+  },
+  {
+    "variant": "transport_only",
+    "prompt_id": "song_pop",
+    "seed": "1",
+    "transcript": "战术再乐光下我渡渊走回忆入炒游上心头曾經的笑 現在的錯都發作 已被苦酒風吹過落葉飄散你的影響 心見人愛你 是為你愛讓我不再太懷疼流就算世界見到黑白 我一人為你收盒曾是的夜 你紅閃說你的文口一人清涉愛你 是為你愛讓我不再太懷疼流就算世界見到黑白 我一人為你收盒"
+  },
+  {
+    "variant": "transport_only",
+    "prompt_id": "song_rnb",
+    "seed": "0",
+    "transcript": "Uh-oh-oh. Oh Move like this in normal your skin Slow-proof lighting Love me again With this for softly in my heart Tell me what I'd be apart Baby on my shining star No matter where you are Holding onto what we have Our love will always last Lazy Sundays morning hey Lost inside your love again Oh Baby on my shining star No matter where you are Holding onto what we have Love I love always last"
+  },
+  {
+    "variant": "transport_only",
+    "prompt_id": "song_rnb",
+    "seed": "1",
+    "transcript": "Oooh Slow-grubletting love begin We're spurts off me and my ear Tell me that you're always here Feel the rhythm of my heart Never wanna be apart Baby, you're my shining star No matter where you are Holding on to what we have I love what always stands on Places, Sundays, morning haze Lost in sight your love again You're my shining star No matter where you are Holding on to what we have I love what always stands on"
+  },
+  {
+    "variant": "transport_only",
+    "prompt_id": "song_rock",
+    "seed": "0",
+    "transcript": "I'm running through the night, trying to make things right. Can you feel the fire burning no more turning back? We are young, we are free, we are free. Breaking chains endlessly, shout it out, let them see. This is our day. Destiny, stand up when the world gets rough. You know you are strong enough. We are young, we are free. Breaking chains endlessly, shout it out, let them see. Even the dark clouds roll, how will you lose control? We are young, we are free. Breaking chains endlessly, shout it out. We are young, we are free. Breaking chains endlessly, shout it out. Let them see."
+  },
+  {
+    "variant": "transport_only",
+    "prompt_id": "song_rock",
+    "seed": "1",
+    "transcript": "We got to the morning light, another day another fight, I've been running through the night, trying to make things right, Can you feel the fire? Can you feel the fire burning on more turning back? We are young, we are free, break it chains endlessly, Shout it out, let them see, this is our destiny. Even when the dark clouds roll, I will never lose control, We are young, we are free, break it chains endlessly, We are young, we are free, break it chains endlessly, We are young, we are free, break it chains endlessly,"
+  }
+]

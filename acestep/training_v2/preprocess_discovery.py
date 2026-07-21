@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -124,22 +125,93 @@ def load_sample_metadata(
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("[Side-Step] Failed to load dataset JSON: %s", exc)
 
-    # Fill defaults for any audio file without metadata
+    # Fill defaults for any audio file without metadata.
+    # Also scan for sidecar .lyrics.txt / .caption.txt and .json files
+    # (same behaviour as the V1 ScanMixin pipeline).
     for af in audio_files:
         if af.name not in meta:
-            meta[af.name] = {
-                "filename": af.name,
-                "caption": af.stem.replace("_", " ").replace("-", " "),
-                "lyrics": "[Instrumental]",
-                "genre": "",
-                "bpm": None,
-                "keyscale": "",
-                "timesignature": "",
-                "duration": 0,
-                "is_instrumental": True,
-            }
+            meta[af.name] = _build_sample_meta_from_files(af)
+        else:
+            # Sample exists in JSON – fill in any missing fields from sidecar files.
+            _patch_meta_from_files(af, meta[af.name])
 
     return meta
+
+
+def _read_sidecar_text(path: str) -> Optional[str]:
+    """Read a sidecar text file, returning stripped content or None."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        content = Path(path).read_text(encoding="utf-8").strip()
+        return content if content else None
+    except OSError:
+        return None
+
+
+def _build_sample_meta_from_files(af: Path) -> Dict[str, Any]:
+    """Build sample metadata from sidecar files (no JSON entry)."""
+    base = os.path.splitext(str(af))[0]
+    lyrics = "[Instrumental]"
+    caption = af.stem.replace("_", " ").replace("-", " ")
+    is_instrumental = True
+
+    # Lyrics: .lyrics.txt (preferred), then .txt (legacy)
+    for suffix in (".lyrics.txt", ".txt"):
+        content = _read_sidecar_text(base + suffix)
+        if content is not None:
+            lyrics = content
+            is_instrumental = False
+            break
+
+    # Caption: .caption.txt
+    caption_content = _read_sidecar_text(base + ".caption.txt")
+    if caption_content is not None:
+        caption = caption_content
+
+    # JSON sidecar: bpm / keyscale / timesignature / language
+    json_meta = {}
+    json_path = base + ".json"
+    if os.path.isfile(json_path):
+        try:
+            json_meta = json.loads(Path(json_path).read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if json_meta.get("language") and json_meta.get("language") != "instrumental":
+        is_instrumental = False
+
+    return {
+        "filename": af.name,
+        "caption": caption,
+        "lyrics": lyrics,
+        "genre": json_meta.get("genre", ""),
+        "bpm": json_meta.get("bpm"),
+        "keyscale": json_meta.get("keyscale", ""),
+        "timesignature": json_meta.get("timesignature", ""),
+        "duration": json_meta.get("duration", 0),
+        "is_instrumental": is_instrumental,
+    }
+
+
+def _patch_meta_from_files(af: Path, meta: Dict[str, Any]) -> None:
+    """Fill missing lyrics / caption / bpm from sidecar files when JSON entry exists."""
+    base = os.path.splitext(str(af))[0]
+
+    # Only fill lyrics if the JSON didn't provide them
+    if not meta.get("lyrics") or meta["lyrics"] == "[Instrumental]":
+        for suffix in (".lyrics.txt", ".txt"):
+            content = _read_sidecar_text(base + suffix)
+            if content is not None:
+                meta["lyrics"] = content
+                meta["is_instrumental"] = False
+                break
+
+    # Only fill caption if JSON didn't provide it
+    if not meta.get("caption"):
+        caption_content = _read_sidecar_text(base + ".caption.txt")
+        if caption_content is not None:
+            meta["caption"] = caption_content
 
 
 def load_dataset_metadata(dataset_json: Optional[str]) -> Dict[str, Any]:

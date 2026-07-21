@@ -50,7 +50,7 @@ from acestep.training_v2.trainer_helpers import (
     save_final,
     verify_saved_adapter,
 )
-from acestep.training_v2.trainer_basic_loop import run_basic_training_loop, _log_phase_memory_gate
+from acestep.training_v2.trainer_basic_loop import run_basic_training_loop, _log_transport_diag, _log_section_rope_diag
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +251,10 @@ class FixedLoRATrainer:
         # -- TensorBoard logger ---------------------------------------------
         tb = TrainingLogger(cfg.effective_log_dir)
 
+        # -- Step-based checkpoint config -----------------------------------
+        SAVE_EVERY_N_STEPS = getattr(cfg, 'save_every_n_steps', 500)
+        best_loss = float('inf')
+
         # -- Dataloader -----------------------------------------------------
         train_loader = data_module.train_dataloader()
 
@@ -290,22 +294,34 @@ class FixedLoRATrainer:
 
         # -- Training memory features ----------------------------------------
         if getattr(cfg, "gradient_checkpointing", True):
-            ckpt_ok, cache_off, grads_ok = configure_memory_features(
-                self.module.model.decoder
-            )
-            self.module.force_input_grads_for_checkpointing = ckpt_ok
-            if ckpt_ok:
+            # TSM uses hook-based hidden state injection, which is
+            # incompatible with gradient checkpointing.  When enabled,
+            # torch.utils.checkpoint wraps layer forward in torch.no_grad(),
+            # detaching the hook-injected output from the autograd graph.
+            if getattr(cfg, "use_tsm", False):
                 yield TrainingUpdate(
                     0, 0.0,
-                    f"[INFO] Gradient checkpointing enabled "
-                    f"(use_cache={not cache_off}, input_grads={grads_ok})",
-                    kind="info",
-                )
-            else:
-                yield TrainingUpdate(
-                    0, 0.0, "[WARN] Gradient checkpointing not supported by this model",
+                    "[INFO] Gradient checkpointing DISABLED (TSM requires hook-based "
+                    "gradient flow; checkpointing would detach TSM from autograd)",
                     kind="warn",
                 )
+            else:
+                ckpt_ok, cache_off, grads_ok = configure_memory_features(
+                    self.module.model.decoder
+                )
+                self.module.force_input_grads_for_checkpointing = ckpt_ok
+                if ckpt_ok:
+                    yield TrainingUpdate(
+                        0, 0.0,
+                        f"[INFO] Gradient checkpointing enabled "
+                        f"(use_cache={not cache_off}, input_grads={grads_ok})",
+                        kind="info",
+                    )
+                else:
+                    yield TrainingUpdate(
+                        0, 0.0, "[WARN] Gradient checkpointing not supported by this model",
+                        kind="warn",
+                    )
         else:
             yield TrainingUpdate(
                 0, 0.0,
@@ -376,6 +392,7 @@ class FixedLoRATrainer:
                     self.fabric.clip_gradients(
                         self.module.model.decoder, optimizer, max_norm=cfg.max_grad_norm,
                     )
+                    self.module._pmr_capture_grads()
                     optimizer.step()
                     scheduler.step()
                     global_step += 1
@@ -385,9 +402,12 @@ class FixedLoRATrainer:
                     if global_step % cfg.log_every == 0:
                         tb.log_loss(avg_loss, global_step)
                         tb.log_lr(_lr, global_step)
+
+                        msg = f"Epoch {epoch + 1}/{cfg.max_epochs}, Step {global_step}, Loss: {avg_loss:.4f}"
+
                         yield TrainingUpdate(
                             step=global_step, loss=avg_loss,
-                            msg=f"Epoch {epoch + 1}/{cfg.max_epochs}, Step {global_step}, Loss: {avg_loss:.4f}",
+                            msg=msg,
                             kind="step", epoch=epoch + 1, max_epochs=cfg.max_epochs, lr=_lr,
                             steps_per_epoch=steps_per_epoch,
                         )
@@ -395,7 +415,8 @@ class FixedLoRATrainer:
                     if global_step % cfg.log_heavy_every == 0:
                         tb.log_per_layer_grad_norms(self.module.model, global_step)
 
-                    _log_phase_memory_gate(self.module, tb, global_step)
+                    _log_transport_diag(self.module, tb, global_step)
+                    _log_section_rope_diag(self.module, tb, global_step)
 
                     optimizer.zero_grad(set_to_none=True)
                     epoch_loss += avg_loss
@@ -408,11 +429,38 @@ class FixedLoRATrainer:
                     if torch.cuda.is_available() and global_step % cfg.log_every == 0:
                         torch.cuda.empty_cache()
 
+                    # Step-based checkpoint (every 500 steps)
+                    if global_step > 0 and global_step % SAVE_EVERY_N_STEPS == 0:
+                        ckpt_dir = str(output_dir / "checkpoints" / f"step_{global_step}_loss_{avg_loss:.4f}")
+                        self._save_checkpoint(optimizer, scheduler, epoch + 1, global_step, ckpt_dir)
+                        # Save diagnostics alongside checkpoint
+                        pm_diag = getattr(self.module, 'pm_diag', None)
+                        if pm_diag:
+                            import json
+                            (Path(ckpt_dir) / "diagnostics.json").write_text(json.dumps(pm_diag, indent=2))
+                        yield TrainingUpdate(
+                            step=global_step, loss=avg_loss,
+                            msg=f"[OK] Step checkpoint saved at step {global_step}",
+                            kind="checkpoint", epoch=epoch + 1, max_epochs=cfg.max_epochs,
+                            checkpoint_path=ckpt_dir,
+                        )
+
+                    # Best-loss checkpoint (save on improvement)
+                    if avg_loss < best_loss:
+                        best_loss = avg_loss
+                        best_dir = str(output_dir / "checkpoints" / "best_loss")
+                        self._save_checkpoint(optimizer, scheduler, epoch + 1, global_step, best_dir)
+                        pm_diag = getattr(self.module, 'pm_diag', None)
+                        if pm_diag:
+                            import json
+                            (Path(best_dir) / "diagnostics.json").write_text(json.dumps(pm_diag, indent=2))
+
             # Flush remainder
             if accumulation_step > 0:
                 self.fabric.clip_gradients(
                     self.module.model.decoder, optimizer, max_norm=cfg.max_grad_norm,
                 )
+                self.module._pmr_capture_grads()
                 optimizer.step()
                 scheduler.step()
                 global_step += 1
@@ -429,7 +477,8 @@ class FixedLoRATrainer:
                         steps_per_epoch=steps_per_epoch,
                     )
 
-                _log_phase_memory_gate(self.module, tb, global_step)
+                _log_transport_diag(self.module, tb, global_step)
+                _log_section_rope_diag(self.module, tb, global_step)
 
                 optimizer.zero_grad(set_to_none=True)
                 epoch_loss += avg_loss
@@ -484,7 +533,12 @@ class FixedLoRATrainer:
         self._save_final(final_path)
         final_loss = self.module.training_losses[-1] if self.module.training_losses else 0.0
 
-        adapter_label = "LoKR" if self.adapter_type == "lokr" else "LoRA"
+        adapter_labels = {
+            "lora": "LoRA", "lokr": "LoKR", "phase_memory": "PhaseMemory",
+            "section_rope": "Section-RoPE", "pmdc_clock": "PMDC Clock",
+            "pm_retrieval": "PM-Retrieval",
+        }
+        adapter_label = adapter_labels.get(self.adapter_type, "LoRA")
         tb.flush()
         tb.close()
         yield TrainingUpdate(

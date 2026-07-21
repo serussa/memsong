@@ -42,6 +42,8 @@ from vector_quantize_pytorch import ResidualFSQ
 
 from acestep.phase_memory import PhaseMemory
 
+from acestep.tgca.section_rope import rope_with_phase_offset, SectionRoPEOffset
+
 # Local config import with fallback
 try:
     from .configuration_acestep_v15 import AceStepConfig
@@ -296,6 +298,8 @@ class AceStepAttention(nn.Module):
         encoder_hidden_states: Optional[torch.Tensor] = None,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] = None,
         output_attentions: Optional[bool] = False,
+        section_rope_offset: Optional[torch.Tensor] = None,
+        section_rope_time_dim: int = 0,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
@@ -332,6 +336,15 @@ class AceStepAttention(nn.Module):
                 # No cache used, compute K/V directly
                 key_states = self.k_norm(self.k_proj(encoder_hidden_states).view(encoder_hidden_shape)).transpose(1, 2)
                 value_states = self.v_proj(encoder_hidden_states).view(encoder_hidden_shape).transpose(1, 2)
+
+            # Section-RoPE offset: apply section-type-conditioned phase offset
+            # to K's first section_rope_time_dim dimensions in cross-attention.
+            if section_rope_offset is not None and section_rope_time_dim > 0:
+                key_states = rope_with_phase_offset(
+                    key_states,
+                    time_dim=section_rope_time_dim,
+                    phase_offset=section_rope_offset,
+                )
         
         # Self-attention path: attend to the same sequence
         else:
@@ -370,7 +383,6 @@ class AceStepAttention(nn.Module):
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
-
 
 class AceStepEncoderLayer(GradientCheckpointingLayer):
     """
@@ -478,6 +490,23 @@ class AceStepDiTLayer(GradientCheckpointingLayer):
                 dim=config.hidden_size,
                 mem_dim=pm_dim or 128,
             )
+        # Section-RoPE Offset V2: head-specific section-type phase offset on K side
+        self.use_section_rope = False
+        section_rope_layers = getattr(config, "section_rope_layers", [12])
+        if getattr(config, "use_section_rope_offset", False) and layer_idx in section_rope_layers:
+            self.section_rope_offset_module = SectionRoPEOffset(
+                num_heads=getattr(config, "section_rope_num_heads", config.num_key_value_heads),
+                num_section_types=getattr(config, "num_section_types", 8),
+                rope_pair_dim=getattr(config, "section_rope_pair_dim", 16),
+                max_offset=getattr(config, "section_phase_max_offset", 0.03),
+                init_log_scale=-3.5,
+                strength=getattr(config, "section_rope_strength", 1.0),
+            )
+            self.section_rope_time_dim = getattr(config, "section_time_dim", 32)
+            self.use_section_rope = True
+            logger.info(f"[Section-RoPE V2] enabled on layer {layer_idx} "
+                        f"(heads={config.num_attention_heads}, max_offset=0.03, "
+                        f"use_token_weights={getattr(config, 'use_token_weights', True)})")
 
         # Scale-shift table for adaptive layer norm modulation (6 values: 3 for self-attn, 3 for MLP)
         self.scale_shift_table = nn.Parameter(torch.randn(1, 6, config.hidden_size) / config.hidden_size**0.5)
@@ -525,6 +554,17 @@ class AceStepDiTLayer(GradientCheckpointingLayer):
         # Step 2: Cross-attention (if enabled) for conditioning on encoder outputs
         if self.use_cross_attention:
             norm_hidden_states = self.cross_attn_norm(hidden_states).type_as(hidden_states)
+
+            # Section-RoPE V2: head-specific phase offset for K side
+            section_rope_kwargs = {}
+            if self.use_section_rope and hasattr(self, "section_rope_offset_module"):
+                section_ids = kwargs.pop("section_ids", None)
+                token_weights = kwargs.pop("token_weights", None)
+                if section_ids is not None:
+                    delta = self.section_rope_offset_module(section_ids, token_weights=token_weights)
+                    section_rope_kwargs["section_rope_offset"] = delta
+                    section_rope_kwargs["section_rope_time_dim"] = self.section_rope_time_dim
+
             attn_output, cross_attn_weights = self.cross_attn(
                 hidden_states=norm_hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
@@ -532,14 +572,16 @@ class AceStepDiTLayer(GradientCheckpointingLayer):
                 past_key_value=past_key_value,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
+                **section_rope_kwargs,
                 **kwargs,
             )
             # Standard residual connection for cross-attention
             hidden_states = hidden_states + attn_output
 
         # Step 2.5: Recurrent Phase State (single layer 12 only)
+        pm_kl_loss = None
         if self.use_phase_memory and self.use_cross_attention and encoder_hidden_states is not None:
-            hidden_states = self.phase_memory(hidden_states, diffusion_step)
+            hidden_states, pm_kl_loss = self.phase_memory(hidden_states, diffusion_step)
 
         # Step 3: Feed-forward (MLP) with adaptive layer norm
         # Apply adaptive normalization for MLP: norm(x) * (1 + scale) + shift
@@ -548,7 +590,7 @@ class AceStepDiTLayer(GradientCheckpointingLayer):
         # Apply gated residual connection: x = x + mlp_output * gate
         hidden_states = (hidden_states + ff_output * c_gate_msa).type_as(hidden_states)
 
-        outputs = (hidden_states,)
+        outputs = (hidden_states, pm_kl_loss)
         if output_attentions:
             outputs += (self_attn_weights, cross_attn_weights)
 
@@ -1264,10 +1306,11 @@ class Lambda(nn.Module):
         return self.func(x)
 
 
+
 class AceStepDiTModel(AceStepPreTrainedModel):
     """
     DiT (Diffusion Transformer) model for AceStep.
-    
+
     Main diffusion model that generates audio latents conditioned on text, lyrics,
     and timbre. Uses patch-based processing with transformer layers, timestep
     conditioning, and cross-attention to encoder outputs.
@@ -1280,17 +1323,17 @@ class AceStepDiTModel(AceStepPreTrainedModel):
         # PhaseMemory: SINGLE recurrent complex state on middle layer only
         num_layers = config.num_hidden_layers
         hook_layer = num_layers // 2                     # e.g. 24 -> 12
+        use_pm = getattr(config, "use_pm", False)
         self.layers = nn.ModuleList([
             AceStepDiTLayer(config, layer_idx,
-                            use_phase_memory=(layer_idx == hook_layer))
+                            use_phase_memory=(use_pm and layer_idx == hook_layer))
             for layer_idx in range(num_layers)
         ])
-        # Log which layer has PhaseMemory
-        phase_layer_ids = [i for i in range(num_layers) if i == hook_layer]
-        logger.info(
-            f"PhaseMemory injected on layer {hook_layer} only "
-            f"(1/{num_layers} layers)"
-        )
+        if use_pm:
+            logger.info(
+                f"PhaseMemory injected on layer {hook_layer} only "
+                f"(1/{num_layers} layers)"
+            )
 
         in_channels = config.in_channels
         inner_dim = config.hidden_size
@@ -1498,7 +1541,23 @@ class AceStepDiTModel(AceStepPreTrainedModel):
                 all_cross_attentions = ()
 
         # Process through transformer layers
+        pm_kl_loss = None
+        # Extract optional section_ids for Section-RoPE V2
+        section_ids_for_layers = flash_attn_kwargs.pop("section_ids", None) if flash_attn_kwargs else None
+        token_weights = None
+        if section_ids_for_layers is not None and getattr(self.config, "use_token_weights", False):
+            from acestep.tgca.lyrics_parser import compute_token_weights
+            token_weights = compute_token_weights(section_ids_for_layers).to(
+                dtype=torch.float32, device=section_ids_for_layers.device,
+            )
+
         for index_block, layer_module in enumerate(self.layers):
+
+            layer_kwargs = dict(flash_attn_kwargs)
+            if getattr(layer_module, "use_section_rope", False) and section_ids_for_layers is not None:
+                layer_kwargs["section_ids"] = section_ids_for_layers
+                if token_weights is not None:
+                    layer_kwargs["token_weights"] = token_weights
 
             layer_outputs = layer_module(
                 hidden_states,
@@ -1513,16 +1572,20 @@ class AceStepDiTModel(AceStepPreTrainedModel):
                 cache_position,
                 encoder_hidden_states,
                 self_attn_mask_mapping["encoder_attention_mask"],
-                **flash_attn_kwargs,
+                **layer_kwargs,
             )
             hidden_states = layer_outputs[0]
 
+            # Collect PhaseMemory kl_loss from the middle layer (has PhaseMemory)
+            if len(layer_outputs) >= 2 and layer_outputs[1] is not None:
+                pm_kl_loss = layer_outputs[1]
+
             if output_attentions and self.layers[index_block].use_cross_attention:
-                # layer_outputs structure: (hidden_states, self_attn_weights, cross_attn_weights)
+                # layer_outputs structure: (hidden_states, pm_kl_loss, self_attn_weights, cross_attn_weights)
                 # Extract the last element which is cross_attn_weights
-                if len(layer_outputs) >= 3:
-                    all_cross_attentions += (layer_outputs[2],)
-        
+                cross_attn_idx = 3 if len(layer_outputs) >= 4 else 2
+                all_cross_attentions += (layer_outputs[cross_attn_idx],)
+
         if return_hidden_states:
             return hidden_states
 
@@ -1539,7 +1602,7 @@ class AceStepDiTModel(AceStepPreTrainedModel):
         # Crop back to original sequence length to ensure exact length match (remove padding)
         hidden_states = hidden_states[:, :original_seq_len, :]
         
-        outputs = (hidden_states, past_key_values)
+        outputs = (hidden_states, past_key_values, pm_kl_loss)
 
         if output_attentions:
             outputs += (all_cross_attentions,)
@@ -1808,6 +1871,7 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
         # Flow matching loss: predict the flow field v = x1 - x0
         flow = x1 - x0
         diffusion_loss = F.mse_loss(decoder_outputs[0], flow)
+
         return {
             "diffusion_loss": diffusion_loss,
         }
@@ -1899,6 +1963,7 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
         clean_src_latents: Optional[torch.FloatTensor] = None,
         repaint_crossfade_frames: int = 10,
         repaint_injection_ratio: float = 0.5,
+        lyrics_text: str = "",
         **kwargs,
     ):
         if attention_mask is None:
@@ -2009,6 +2074,21 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
             context_latents = torch.cat([context_latents, context_latents], dim=0)
             attention_mask = torch.cat([attention_mask, attention_mask], dim=0)
         
+        # Section-RoPE V2: parse section_ids and token_weights from lyrics text
+        if not lyrics_text:
+            lyrics_text = getattr(self, '_lyrics_raw', '')
+        if lyrics_text and getattr(self.config, "use_section_rope_offset", False):
+            L = encoder_hidden_states.shape[1]
+            from acestep.tgca.lyrics_parser import LyricsStructureParser, compute_token_weights
+            parser = LyricsStructureParser()
+            output = parser.parse(lyrics_text, num_chunks=L)
+            section_ids = output.section_type_ids.to(dtype=torch.long, device=device)
+            section_ids = section_ids.unsqueeze(0).expand(encoder_hidden_states.shape[0], -1)
+            kwargs['section_ids'] = section_ids
+            if getattr(self.config, "use_token_weights", False):
+                tw = compute_token_weights(section_ids).to(dtype=torch.float32, device=device)
+                kwargs['token_weights'] = tw
+
         _switched_to_non_cover = False
         with torch.no_grad():
             for step_idx, (t_curr, t_prev) in enumerate(iterator):
@@ -2037,6 +2117,7 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
                     context_latents=context_latents,
                     use_cache=True,
                     past_key_values=past_key_values,
+                    **kwargs,
                 )
                 
                 vt = decoder_outputs[0]

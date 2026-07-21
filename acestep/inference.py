@@ -89,7 +89,7 @@ class GenerationParams:
         use_cot_metas: Whether to let LLM generate music metadata via CoT reasoning.
         use_cot_caption: Whether to let LLM rewrite or format the input caption via CoT reasoning.
         use_cot_language: Whether to let LLM detect vocal language via CoT.
-    """
+        """
     # Required Inputs
     task_type: str = "text2music"
     instruction: str = "Fill the audio semantic mask based on the given conditions:"
@@ -156,7 +156,7 @@ class GenerationParams:
     lm_negative_prompt: str = "NO USER INPUT"
     use_cot_metas: bool = True
     use_cot_caption: bool = True
-    use_cot_lyrics: bool = False  # TODO: not used yet
+    use_cot_lyrics: bool = False
     use_cot_language: bool = True
     use_constrained_decoding: bool = True
 
@@ -297,13 +297,25 @@ def _update_metadata_from_lm(
         if time_signature_value != "N/A":
             time_signature = time_signature_value
 
-    if audio_duration is None or audio_duration <= 0:
-        audio_duration_value = metadata.get('duration', -1)
-        if audio_duration_value not in ["N/A", ""]:
-            try:
-                audio_duration = float(audio_duration_value)
-            except (ValueError, TypeError):
-                pass
+    # Always prefer LM metadata duration over input: the LM's CoT analysis
+    # of the full lyrics is a better estimate than the heuristics-based input duration.
+    # HOWEVER: if audio_duration was already computed from actual generated codes
+    # (more accurate than CoT estimate), keep it.
+    _lm_dur = metadata.get('duration', None)
+    if _lm_dur is not None and str(_lm_dur) not in ["N/A", ""]:
+        try:
+            _lm_dur_f = float(_lm_dur)
+            # Only override if codes-derived duration isn't already set
+            # (codes-derived = generated code_count / 5, which is ground truth)
+            if audio_duration is None or audio_duration <= 0:
+                audio_duration = _lm_dur_f
+            else:
+                logger.debug(
+                    f"[metadata] audio_duration already set ({audio_duration:.0f}s), "
+                    f"not overridden by LM CoT value ({_lm_dur_f:.0f}s)"
+                )
+        except (ValueError, TypeError):
+            pass
 
     if not vocal_language and metadata.get('vocal_language'):
         vocal_language = metadata.get('vocal_language')
@@ -441,11 +453,13 @@ def generate_music(
                 if time_sig_clean.lower() not in ["n/a", ""]:
                     user_metadata['timesignature'] = time_sig_clean
 
+            # Don't pass heuristic duration to LM — let the LM's own CoT analysis
+            # determine the duration from lyric content, which is more accurate.
             if audio_duration is not None:
                 try:
                     duration_value = float(audio_duration)
                     if duration_value > 0:
-                        user_metadata['duration'] = int(duration_value)
+                        pass  # duration intentionally omitted — let LM decide
                 except (ValueError, TypeError):
                     pass
 
@@ -484,7 +498,10 @@ def generate_music(
                     negative_prompt=params.lm_negative_prompt,
                     top_k=top_k_value,
                     top_p=top_p_value,
-                    target_duration=audio_duration,  # Pass duration to limit audio codes generation
+                    # Don't pass heuristic duration to LM; let LM's own CoT determine
+                    # how many codes to generate based on lyric analysis.
+                    # The constrained processor (max_duration=600s) still bounds it.
+                    target_duration=None,
                     user_metadata=user_metadata_to_pass,
                     use_cot_caption=params.use_cot_caption,
                     use_cot_language=params.use_cot_language,
@@ -543,6 +560,17 @@ def generate_music(
                     audio_code_string_to_use = all_audio_codes_list
                 else:
                     audio_code_string_to_use = all_audio_codes_list[0] if all_audio_codes_list else ""
+                # Compute actual duration from generated codes count (most reliable signal)
+                if isinstance(audio_code_string_to_use, str) and audio_code_string_to_use:
+                    n_codes = audio_code_string_to_use.count("<|audio_code_")
+                    if n_codes > 0:
+                        code_duration = n_codes / 5.0
+                        if abs(code_duration - audio_duration) > 1.0:
+                            logger.info(
+                                f"[LM] Generated {n_codes} codes ≈ {code_duration:.0f}s "
+                                f"(input target was {audio_duration:.0f}s). Using {code_duration:.0f}s."
+                            )
+                        audio_duration = code_duration
             else:
                 # For "dit" mode, keep user-provided codes or empty
                 audio_code_string_to_use = params.audio_codes
@@ -588,6 +616,7 @@ def generate_music(
 
         # Phase 2: DiT music generation
         # Use seed_for_generation (from config.seed or params.seed) instead of params.seed for actual generation
+
         result = dit_handler.generate_music(
             captions=dit_input_caption,
             global_caption=params.global_caption,

@@ -238,7 +238,37 @@ class AceStepConfig(PretrainedConfig):
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.model_version = model_version
-        
+
+        # ------------------------------------------------------------------
+        # Section-RoPE Offset config
+        # ------------------------------------------------------------------
+        self.use_section_rope_offset = False
+        """Enable section-type-conditioned RoPE phase offset on cross-attention K."""
+        self.section_rope_layers = [12]
+        """Which DiT layers get section RoPE offset."""
+        self.num_section_types = 8
+        self.section_time_dim = 32
+        """Number of dims in head_dim to apply section RoPE to (must be even)."""
+        self.section_rope_pair_dim = 16
+        """Number of frequency pairs (= section_time_dim // 2)."""
+        self.section_rope_num_heads = num_key_value_heads
+        """Number of attention heads for head-specific phase (default: 16 for SFT base)."""
+        self.section_phase_init_scale = 0.01
+        self.section_phase_max_offset = 0.03
+        """Max offset per step in radians (V2: tightened from 0.2)."""
+        self.use_token_weights = True
+        """Apply token-aware phase weighting (first 15% = 1.0, middle = 0.5, last 15% = 0.3)."""
+        self.section_rope_strength = 1.0
+        """Global multiplier for Section-RoPE offset (for inference strength sweep)."""
+
+        # Explicitly disable all PM features
+        self.use_pm = False
+        self.use_pm_kv = False
+        self.use_traj = False
+        self.use_anchor = False
+        self.use_entropy_controller = False
+        self.use_kl_loss = False
+
         # Validate rotary position embeddings parameters
         # Backward compatibility: if there is a 'type' field, move it to 'rope_type'
         if self.rope_scaling is not None and "type" in self.rope_scaling:
